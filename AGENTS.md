@@ -35,6 +35,8 @@ A scheduled posting task must carry at minimum the expected FPL event ID and exp
 
 Use the official X API wherever economically viable. Production architecture must not use Selenium, browser automation, X cookies, or automated browser login.
 
+Require explicit posting enablement, valid user-context credentials, a configured expected numeric X user ID, and a fresh `/2/users/me` identity match before every X write. A valid token alone must never enable posting. Treat the immutable user ID as decisive; usernames are diagnostic only. Keep test and production identities and credentials strictly separated.
+
 Posting must be idempotent, with successful-post duplicate prevention keyed primarily by FPL event ID. Once an event ID is recorded as successfully posted, never deliberately publish the V1 deadline tweet for that event again, even if its deadline later differs. Persist enough state to identify the successful event and retain the resulting X Post ID. Task naming or versioning may include both event ID and expected deadline, but it must not weaken event-ID-based successful-post duplicate prevention. Handle ambiguous API or network failures by reconciling outcome safely; do not blindly retry when the first request may have succeeded.
 
 ## Architecture, Cost, and Secrets
