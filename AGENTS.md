@@ -41,9 +41,9 @@ Do not add an OpenAI or other LLM runtime dependency when deterministic Python c
 
 ## Project Structure and Local Commands
 
-The repository currently contains only `README.md` and this guide. Place Python packages under `src/`, tests under `tests/`, and deployment configuration in clearly named root-level or `deploy/` files. Separate FPL ingestion, event classification, scheduling, X publishing, and persistence behind focused interfaces.
+Application code lives under `src/fpl_bot/`, tests under `tests/`, and project/tool configuration in `pyproject.toml`. Keep deployment configuration in clearly named root-level or `deploy/` files. Separate FPL ingestion, event classification, scheduling, X publishing, and persistence behind focused interfaces.
 
-No build or test tooling exists yet. When adding it, expose and document root-level commands for local execution, formatting/linting, the full test suite, and dry-run operation. Keep `README.md` and deployment documentation synchronized with actual production behaviour; GitHub is the canonical source for application code and deployment documentation.
+Use the root-level commands documented in `README.md` for local execution, formatting/linting, the full test suite, and dry-run operation. Keep `README.md` and deployment documentation synchronized with actual production behaviour; GitHub is the canonical source for application code and deployment documentation.
 
 ## Coding and Testing Discipline
 
