@@ -71,6 +71,11 @@ def test_fixture_with_unknown_team_is_rejected() -> None:
         classify_fixtures(make_teams(), (make_fixture(1, 1, 99),))
 
 
+def test_zero_fixtures_are_rejected_instead_of_classified_as_bgw() -> None:
+    with pytest.raises(DataValidationError, match="At least one event fixture"):
+        classify_fixtures(make_teams(), ())
+
+
 @pytest.mark.parametrize(
     ("event_id", "kind", "expected"),
     [

@@ -6,21 +6,30 @@ from typing import Any
 from fpl_bot.errors import DataValidationError
 from fpl_bot.models import Fixture, Team
 
+EXPECTED_TEAM_COUNT = 20
+
 
 def parse_teams(payload: object) -> tuple[Team, ...]:
-    if not isinstance(payload, list) or not payload:
-        raise DataValidationError("FPL teams must be a non-empty JSON array")
+    if not isinstance(payload, list):
+        raise DataValidationError("FPL teams must be a JSON array")
 
     teams = tuple(_parse_team(item) for item in payload)
     team_ids = [team.team_id for team in teams]
     if len(team_ids) != len(set(team_ids)):
         raise DataValidationError("FPL teams contain duplicate team IDs")
+    if len(teams) != EXPECTED_TEAM_COUNT:
+        raise DataValidationError(
+            f"FPL teams must contain exactly {EXPECTED_TEAM_COUNT} unique teams; "
+            f"received {len(teams)}"
+        )
     return teams
 
 
 def parse_fixtures(payload: object, expected_event_id: int) -> tuple[Fixture, ...]:
     if not isinstance(payload, list):
         raise DataValidationError("FPL fixtures must be a JSON array")
+    if not payload:
+        raise DataValidationError("FPL event fixtures must contain at least one fixture")
 
     fixtures = tuple(_parse_fixture(item, expected_event_id) for item in payload)
     fixture_ids = [fixture.fixture_id for fixture in fixtures]

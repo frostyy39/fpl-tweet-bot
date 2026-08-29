@@ -16,6 +16,8 @@ Derive `EVENT_CODE` automatically as `GWx`, `BGWx`, `DGWx`, or `BDGWx`. Never ha
 
 Treat live FPL data as authoritative for the event ID, official deadline, and event fixtures. Use the official FPL deadline when available; never infer it from Premier League kickoff times. Use timezone-aware UTC datetimes internally; never use naive datetimes for scheduling or deadline comparisons. Convert to `Europe/London` only for human-readable deadlines and same-calendar-day scheduling, including correct GMT/BST transitions.
 
+Require exactly 20 unique current teams in the authoritative bootstrap data. Treat an event with zero assigned fixtures as ambiguous and fail closed rather than classifying it as a BGW.
+
 Classify an event from its fixtures:
 
 - **GW:** all 20 teams have exactly one fixture.
@@ -26,6 +28,8 @@ Classify an event from its fixtures:
 ## Scheduling and Posting Safety
 
 Automatically detect the next official FPL deadline. Arm the final posting task only when that deadline falls on the current `Europe/London` calendar day, and target the official deadline timestamp itself. Never intentionally post early. A preflight or warmup may run shortly beforehand, but it must publish nothing.
+
+An eligible `is_next` event must not skip another event with an earlier unpassed official deadline. Treat that chronology as contradictory and fail closed; a passed `is_current` event followed by a future `is_next` event is normal.
 
 A scheduled posting task must carry at minimum the expected FPL event ID and expected official deadline timestamp. Immediately before publishing, re-fetch authoritative FPL data and require both values to match the currently authoritative event and deadline. If either differs, the task is stale and must fail closed without publishing. Provide a safe dry-run mode that exercises decision-making and rendering without publishing or recording a false success.
 

@@ -55,11 +55,32 @@ def test_london_conversion_uses_bst_in_summer() -> None:
 def test_next_event_prefers_fpl_is_next_flag() -> None:
     now = datetime(2026, 8, 1, tzinfo=UTC)
     events = (
+        make_event(2, now + timedelta(days=2), is_next=True),
+        make_event(3, now + timedelta(days=9)),
+    )
+
+    assert select_next_event(events, now).event_id == 2
+
+
+def test_next_event_allows_passed_current_and_future_next_overlap() -> None:
+    now = datetime(2026, 8, 1, tzinfo=UTC)
+    events = (
+        make_event(2, now - timedelta(seconds=1), is_current=True),
+        make_event(3, now + timedelta(days=7), is_next=True),
+    )
+
+    assert select_next_event(events, now).event_id == 3
+
+
+def test_next_event_rejects_is_next_that_skips_earlier_unpassed_deadline() -> None:
+    now = datetime(2026, 8, 1, tzinfo=UTC)
+    events = (
         make_event(2, now + timedelta(days=2)),
         make_event(3, now + timedelta(days=9), is_next=True),
     )
 
-    assert select_next_event(events, now).event_id == 3
+    with pytest.raises(DataValidationError, match="earlier unpassed deadline"):
+        select_next_event(events, now)
 
 
 def test_next_event_uses_future_current_flag_when_no_next_flag_exists() -> None:

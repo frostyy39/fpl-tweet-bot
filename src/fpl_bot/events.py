@@ -44,7 +44,7 @@ def select_next_event(
     events: Sequence[FplEvent],
     now: datetime | None = None,
 ) -> FplEvent:
-    """Select FPL's explicit next/current future event, then fall back by deadline."""
+    """Select an explicit chronology-safe next/current event, then fall back by deadline."""
     reference = now or datetime.now(UTC)
     if reference.tzinfo is None or reference.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
@@ -53,12 +53,28 @@ def select_next_event(
     if not eligible:
         raise NoSuitableEventError("FPL exposes no event with a current or future deadline")
 
-    for attribute in ("is_next", "is_current"):
-        preferred = tuple(event for event in eligible if getattr(event, attribute))
-        if len(preferred) > 1:
-            raise DataValidationError(f"FPL marks multiple eligible events as {attribute}")
-        if preferred:
-            return preferred[0]
+    explicit_next = tuple(event for event in eligible if event.is_next)
+    if len(explicit_next) > 1:
+        raise DataValidationError("FPL marks multiple eligible events as is_next")
+    if explicit_next:
+        next_event = explicit_next[0]
+        earlier_event = min(
+            (event for event in eligible if event.deadline_utc < next_event.deadline_utc),
+            key=lambda event: (event.deadline_utc, event.event_id),
+            default=None,
+        )
+        if earlier_event is not None:
+            raise DataValidationError(
+                f"FPL marks event {next_event.event_id} as is_next, but event "
+                f"{earlier_event.event_id} has an earlier unpassed deadline"
+            )
+        return next_event
+
+    explicit_current = tuple(event for event in eligible if event.is_current)
+    if len(explicit_current) > 1:
+        raise DataValidationError("FPL marks multiple eligible events as is_current")
+    if explicit_current:
+        return explicit_current[0]
 
     return min(eligible, key=lambda event: (event.deadline_utc, event.event_id))
 

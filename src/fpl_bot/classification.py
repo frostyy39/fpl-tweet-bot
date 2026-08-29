@@ -18,6 +18,8 @@ def classify_fixtures(
 ) -> FixtureClassification:
     if not teams:
         raise DataValidationError("At least one current Premier League team is required")
+    if not fixtures:
+        raise DataValidationError("At least one event fixture is required for classification")
 
     team_by_id = {team.team_id: team for team in teams}
     if len(team_by_id) != len(teams):

@@ -40,15 +40,18 @@ def test_service_builds_report_from_mocked_fpl_responses() -> None:
                 }
             ],
             "teams": [
-                {"id": 1, "name": "Team 1", "short_name": "T1"},
-                {"id": 2, "name": "Team 2", "short_name": "T2"},
-                {"id": 3, "name": "Team 3", "short_name": "T3"},
-                {"id": 4, "name": "Team 4", "short_name": "T4"},
+                {"id": team_id, "name": f"Team {team_id}", "short_name": f"T{team_id}"}
+                for team_id in range(1, 21)
             ],
         },
         fixtures=[
-            {"id": 1, "event": 3, "team_h": 1, "team_a": 2},
-            {"id": 2, "event": 3, "team_h": 3, "team_a": 4},
+            {
+                "id": fixture_id,
+                "event": 3,
+                "team_h": fixture_id * 2 - 1,
+                "team_a": fixture_id * 2,
+            }
+            for fixture_id in range(1, 11)
         ],
     )
 

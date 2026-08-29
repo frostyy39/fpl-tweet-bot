@@ -19,13 +19,16 @@ Milestone 1 is a read-only Python core and local dry run. It:
 - retrieves events, official `deadline_time` values, and current teams from FPL's
   `bootstrap-static/` endpoint;
 - retrieves fixtures assigned to the selected event from `fixtures/?event={id}`;
-- selects the next relevant event, preferring a unique future `is_next`, then a unique future
-  `is_current`, then the earliest future deadline;
+- selects the next relevant event, accepting a unique future `is_next` only when it does not skip
+  an earlier unpassed official deadline, then using a unique future `is_current` or the earliest
+  future deadline;
 - parses timezone-aware UTC deadlines and converts them to `Europe/London` with `zoneinfo`;
+- requires exactly 20 unique current teams and at least one fixture assigned to the event;
 - counts every team's fixtures and classifies the event as GW, BGW, DGW, or BDGW;
 - renders the exact V1 tweet and a human-readable diagnostic report.
 
-If FPL exposes no current or future deadline, the command exits cleanly with an explanatory
+If FPL exposes no current or future deadline, contradicts its `is_next` chronology, returns a team
+count other than 20, or returns zero event fixtures, the command exits cleanly with an explanatory
 error instead of guessing. Fixture kickoff times are never used as deadline substitutes.
 
 This milestone cannot post to X. It includes no X client, scheduler, cloud infrastructure,
