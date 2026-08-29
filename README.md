@@ -73,7 +73,10 @@ The future Milestone 2B controlled test will use the private zero-follower accou
 enablement, its configured numeric ID, and an unmistakable caller-supplied message such as
 `FPL Bot API integration test — TEST ACCOUNT ONLY — <timestamp>`. It will not use the deterministic
 V1 deadline tweet. A create-Post timeout, connection failure, server error, or malformed HTTP 201
-is surfaced as an ambiguous write outcome and is never retried automatically.
+is surfaced as an ambiguous write outcome and is never retried automatically. Credentialed X
+requests never follow HTTP redirects, so bearer credentials cannot be forwarded to a redirected
+destination. An unexpected read redirect is a typed API failure; an unexpected create-Post
+redirect or HTTP 408 is an ambiguous write outcome.
 
 ## Requirements and Installation
 

@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from http.client import HTTPException
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from fpl_bot.x_config import XPostingConfig
 from fpl_bot.x_errors import (
@@ -26,6 +26,7 @@ X_API_BASE_URL = "https://api.x.com/"
 X_USER_AGENT = "fpl-tweet-bot/0.2"
 X_ID_PATTERN = re.compile(r"[1-9][0-9]*\Z")
 X_USERNAME_PATTERN = re.compile(r"[A-Za-z0-9_]{1,15}\Z")
+DEFINITE_CREATE_REJECTION_STATUSES = frozenset({400, 401, 403, 404, 422, 429})
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,8 +59,26 @@ class XHttpTransport(Protocol):
     def send(self, request: XHttpRequest, timeout_seconds: float) -> XHttpResponse: ...
 
 
+class _NoRedirectHandler(HTTPRedirectHandler):
+    """Refuse redirects so Authorization is never forwarded to another destination."""
+
+    def redirect_request(
+        self,
+        req: Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        return None
+
+
 class UrllibXHttpTransport:
-    """Small standard-library transport; it never retries requests."""
+    """Standard-library transport with redirects and retries disabled."""
+
+    def __init__(self) -> None:
+        self._opener = build_opener(_NoRedirectHandler())
 
     def send(self, request: XHttpRequest, timeout_seconds: float) -> XHttpResponse:
         urllib_request = Request(
@@ -69,7 +88,7 @@ class UrllibXHttpTransport:
             method=request.method,
         )
         try:
-            with urlopen(urllib_request, timeout=timeout_seconds) as response:
+            with self._opener.open(urllib_request, timeout=timeout_seconds) as response:
                 return XHttpResponse(status_code=response.status, body=response.read())
         except HTTPError as exc:
             try:
@@ -124,14 +143,13 @@ class XApiClient:
                 "ambiguous and must not be retried automatically"
             ) from exc
 
-        if response.status_code >= 500 or 200 <= response.status_code < 300:
-            if response.status_code != 201:
-                raise XAmbiguousWriteError(
-                    f"X returned unexpected HTTP {response.status_code} after create-Post; "
-                    "outcome may be ambiguous and must not be retried automatically"
-                )
-        else:
+        if response.status_code in DEFINITE_CREATE_REJECTION_STATUSES:
             self._raise_for_definite_rejection(response)
+        if response.status_code != 201:
+            raise XAmbiguousWriteError(
+                f"X returned unexpected HTTP {response.status_code} after create-Post; "
+                "outcome may be ambiguous and must not be retried automatically"
+            )
 
         try:
             payload = _decode_json(response.body)

@@ -1,9 +1,13 @@
 import json
 from collections.abc import Iterable
+from io import BytesIO
+from urllib.error import HTTPError
+from urllib.request import Request
 
 import pytest
 
-from fpl_bot.x_api import XApiClient, XHttpRequest, XHttpResponse
+import fpl_bot.x_api as x_api_module
+from fpl_bot.x_api import UrllibXHttpTransport, XApiClient, XHttpRequest, XHttpResponse
 from fpl_bot.x_config import XPostingConfig
 from fpl_bot.x_errors import (
     XAmbiguousWriteError,
@@ -37,6 +41,34 @@ class FakeTransport:
         return outcome
 
 
+class RedirectingFakeOpener:
+    def __init__(self, redirect_handler: object) -> None:
+        self.redirect_handler = redirect_handler
+        self.requests: list[Request] = []
+
+    def open(self, request: Request, timeout: float) -> None:
+        assert timeout == 10.0
+        self.requests.append(request)
+        redirect_url = "https://redirect.invalid/capture"
+        redirected_request = self.redirect_handler.redirect_request(
+            request,
+            BytesIO(),
+            302,
+            "Found",
+            {"Location": redirect_url},
+            redirect_url,
+        )
+        if redirected_request is not None:
+            self.requests.append(redirected_request)
+        raise HTTPError(
+            request.full_url,
+            302,
+            "Found",
+            {"Location": redirect_url},
+            BytesIO(b"redirect refused"),
+        )
+
+
 def json_response(status_code: int, payload: object) -> XHttpResponse:
     return XHttpResponse(status_code, json.dumps(payload).encode())
 
@@ -58,6 +90,39 @@ def write_enabled_config(
         posting_enabled=posting_enabled,
         expected_user_id=expected_user_id,
         user_access_token=token,
+    )
+
+
+def test_urllib_transport_refuses_redirect_without_forwarding_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_handlers: list[object] = []
+    fake_opener: RedirectingFakeOpener | None = None
+
+    def fake_build_opener(*handlers: object) -> RedirectingFakeOpener:
+        nonlocal fake_opener
+        captured_handlers.extend(handlers)
+        fake_opener = RedirectingFakeOpener(handlers[0])
+        return fake_opener
+
+    monkeypatch.setattr(x_api_module, "build_opener", fake_build_opener)
+    transport = UrllibXHttpTransport()
+    request = XHttpRequest(
+        method="GET",
+        url="https://api.x.com/2/users/me",
+        headers={"Authorization": f"Bearer {ACCESS_TOKEN_PLACEHOLDER}"},
+    )
+
+    response = transport.send(request, timeout_seconds=10.0)
+
+    assert len(captured_handlers) == 1
+    assert isinstance(captured_handlers[0], x_api_module._NoRedirectHandler)
+    assert response.status_code == 302
+    assert fake_opener is not None
+    assert len(fake_opener.requests) == 1
+    assert fake_opener.requests[0].full_url == "https://api.x.com/2/users/me"
+    assert fake_opener.requests[0].get_header("Authorization") == (
+        f"Bearer {ACCESS_TOKEN_PLACEHOLDER}"
     )
 
 
@@ -239,6 +304,17 @@ def test_read_api_server_failure_is_typed() -> None:
     assert error.value.status_code == 503
 
 
+def test_read_api_redirect_is_typed_api_failure() -> None:
+    transport = FakeTransport([XHttpResponse(302, b"")])
+    client = XApiClient(write_enabled_config(), transport=transport)
+
+    with pytest.raises(XApiResponseError) as error:
+        client.get_authenticated_user()
+
+    assert error.value.status_code == 302
+    assert len(transport.requests) == 1
+
+
 def test_definite_rejected_create_post_request_is_not_retried() -> None:
     transport = FakeTransport(
         [
@@ -290,6 +366,24 @@ def test_create_post_server_failure_is_ambiguous_and_not_retried() -> None:
     client = XApiClient(write_enabled_config(), transport=transport)
 
     with pytest.raises(XAmbiguousWriteError, match="outcome may be ambiguous"):
+        client.create_text_post("test only")
+
+    assert len(transport.requests) == 2
+
+
+@pytest.mark.parametrize("status_code", [302, 307, 408, 409, 418])
+def test_uncertain_create_post_status_is_ambiguous_and_not_retried(
+    status_code: int,
+) -> None:
+    transport = FakeTransport(
+        [
+            authenticated_user_response(),
+            XHttpResponse(status_code, b""),
+        ]
+    )
+    client = XApiClient(write_enabled_config(), transport=transport)
+
+    with pytest.raises(XAmbiguousWriteError, match=f"HTTP {status_code}"):
         client.create_text_post("test only")
 
     assert len(transport.requests) == 2
