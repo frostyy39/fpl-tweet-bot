@@ -55,6 +55,12 @@ class XHttpResponse:
     body: bytes = field(repr=False)
 
 
+class XPostCreator(Protocol):
+    """Injectable boundary for guarded text-Post creation."""
+
+    def create_text_post(self, text: str) -> CreatedXPost: ...
+
+
 class XHttpTransport(Protocol):
     def send(self, request: XHttpRequest, timeout_seconds: float) -> XHttpResponse: ...
 

@@ -3,19 +3,13 @@
 import argparse
 import sys
 from collections.abc import Callable, Mapping, Sequence
-from typing import Protocol, TextIO
+from typing import TextIO
 
 from fpl_bot.errors import FplBotError
-from fpl_bot.x_api import CreatedXPost, XApiClient
+from fpl_bot.x_api import XApiClient, XPostCreator
 from fpl_bot.x_config import XPostingConfig
 
 TEST_POST_TEXT = "FPL Bot API integration test — TEST ACCOUNT ONLY"
-
-
-class XPostCreator(Protocol):
-    """Small injectable boundary used by the one-shot runner."""
-
-    def create_text_post(self, text: str) -> CreatedXPost: ...
 
 
 ClientFactory = Callable[[XPostingConfig], XPostCreator]

@@ -201,6 +201,24 @@ no Google credentials and make no Firestore requests. Error details are normaliz
 limited to 2,000 characters, and rejected if they resemble authorization or credential material;
 callers should still supply concise, non-secret application errors.
 
+## Deadline Post Execution Coordinator
+
+The injected `DeadlinePostExecutionCoordinator` joins one already-resolved `EventReport` to the
+durable posting-state store and guarded X client. It deterministically revalidates the event code
+and V1 tweet before claiming, persists `posting_in_progress` before invoking X, and then records
+`succeeded`, `failed`, or `uncertain`. The X client still enforces explicit test-mode posting,
+credentials, and `/2/users/me` identity verification before its single create-Post attempt.
+
+The coordinator contains no retry loop. A duplicate claim performs no X operation. Known
+pre-write and definite rejection failures become `failed`; only the X client's explicit ambiguous
+write error becomes `uncertain`. An otherwise unclassifiable boundary bug leaves the event closed
+in `posting_in_progress` rather than guessing that a Post may exist. If X succeeds but the
+success-state write cannot be confirmed, the typed application error retains the known numeric X
+Post ID for manual reconciliation and explicitly prohibits another Post attempt.
+
+This module has no CLI, HTTP endpoint, scheduler, or automatic trigger. Tests inject in-memory
+state and fake X transports; running the test suite cannot contact X, Firestore, or FPL.
+
 ## Requirements and Installation
 
 - Python 3.11 or newer
