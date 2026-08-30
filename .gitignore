@@ -9,5 +9,9 @@ __pycache__/
 *.pem
 *.key
 *.p12
+*.pfx
+*.dpapi
+*.token
+oauth-token*.json
 .coverage
 htmlcov/

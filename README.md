@@ -131,10 +131,50 @@ username. Manually confirm that identity is the dedicated private test account. 
 becomes the canonical `X_EXPECTED_USER_ID` for the later controlled Post; obtaining it does not
 enable posting.
 
+## One-Shot X Test Post
+
+The one-shot runner reuses the existing guarded X API client; it adds no authentication or HTTP
+implementation. Its fixed message is `FPL Bot API integration test — TEST ACCOUNT ONLY`, which is
+deliberately separate from the FPL deadline renderer. By default it only previews that message and
+makes no X API request:
+
+```bash
+python -m fpl_bot.test_post
+# Or, after installation:
+fpl-bot-x-test-post
+```
+
+An approved manual test against the dedicated private test account requires both the explicit
+`--live` option and every existing write guard:
+
+```bash
+python -m fpl_bot.test_post --live
+# Or: fpl-bot-x-test-post --live
+```
+
+Configure `X_ENVIRONMENT=test`, `X_POSTING_ENABLED=true`, `X_EXPECTED_USER_ID`, and
+`X_USER_ACCESS_TOKEN` in the process environment. Never place their values in Git, `.env` files,
+command arguments, screenshots, or documentation. The expected ID must be the numeric ID manually
+verified during the OAuth helper's `/2/users/me` bootstrap. The access token must have
+`tweet.read users.read tweet.write offline.access` authorization.
+
+The OAuth helper remains the sole local token-acquisition path, and its DPAPI file remains the
+encrypted at-rest handoff on Windows. The runner neither reimplements OAuth nor persists tokens;
+for an approved Windows test, load the access token from that handoff into the current process
+environment without printing it.
+
+Live mode validates configuration before creating a client, re-verifies `/2/users/me`, and sends
+exactly one `POST /2/tweets` request without retries. On success it prints only the resulting Post
+ID. Ambiguous outcomes must not be retried manually until reconciled. This runner has no production
+mode and is not connected to FPL event selection, deadline tweets, scheduling, persistence, cloud
+infrastructure, or deployment. **Do not use `--live` until the controlled test is separately
+approved.**
+
 ## Requirements and Installation
 
 - Python 3.11 or newer
-- Internet access only for the live dry run or an explicitly initiated OAuth helper
+- Internet access only for the live FPL dry run, an explicitly initiated OAuth helper, or the
+  separately approved one-shot X test
 
 Create a virtual environment and install the package with development tools:
 

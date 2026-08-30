@@ -21,6 +21,7 @@ dev = [
 [project.scripts]
 fpl-bot = "fpl_bot.cli:main"
 fpl-bot-x-authorize = "fpl_bot.x_oauth_cli:main"
+fpl-bot-x-test-post = "fpl_bot.test_post:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
