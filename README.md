@@ -219,6 +219,24 @@ Post ID for manual reconciliation and explicitly prohibits another Post attempt.
 This module has no CLI, HTTP endpoint, scheduler, or automatic trigger. Tests inject in-memory
 state and fake X transports; running the test suite cannot contact X, Firestore, or FPL.
 
+## Live Deadline Revalidation
+
+`DeadlineExecutionRevalidator` accepts only an expected FPL event ID and timezone-aware UTC
+deadline. At execution it fetches fresh bootstrap data, locates that exact event, requires the live
+official deadline to match exactly, and refuses execution before that deadline. It then fetches
+fresh event fixtures and reuses the deterministic report builder to derive the current
+GW/BGW/DGW/BDGW code and V1 tweet before invoking the existing posting coordinator.
+
+Missing events, changed deadlines, early execution, unavailable FPL data, and malformed teams or
+fixtures fail before any posting-state or X activity. After successful live validation, an existing
+unclaimed audit record is reconciled to the fresh event code while retaining task/preflight audit
+fields. Existing claimed or terminal records skip reconciliation and reach the coordinator's
+duplicate no-op without mutation or X access. A concurrent claim during reconciliation is handled
+the same way; claimed metadata remains immutable and fail-closed.
+
+This layer receives no cached event code or tweet and has no task creation, scheduler, HTTP
+endpoint, retry, cloud provisioning, or deployment behavior.
+
 ## Requirements and Installation
 
 - Python 3.11 or newer

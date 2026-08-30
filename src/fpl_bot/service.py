@@ -7,7 +7,7 @@ from typing import Any, Protocol
 from fpl_bot.classification import classify_fixtures, render_event_code
 from fpl_bot.errors import DataValidationError
 from fpl_bot.events import parse_events, select_next_event, to_london
-from fpl_bot.models import EventReport
+from fpl_bot.models import EventReport, Fixture, FplEvent, Team
 from fpl_bot.parsing import parse_fixtures, parse_teams
 from fpl_bot.tweet import render_v1_tweet
 
@@ -31,6 +31,15 @@ def build_next_event_report(
     event = select_next_event(events, now=now)
     fixture_payload = source.fetch_event_fixtures(event.event_id)
     fixtures = parse_fixtures(list(fixture_payload), expected_event_id=event.event_id)
+    return build_event_report(event, teams, fixtures)
+
+
+def build_event_report(
+    event: FplEvent,
+    teams: Sequence[Team],
+    fixtures: Sequence[Fixture],
+) -> EventReport:
+    """Build the deterministic report for one already-selected authoritative event."""
     classification = classify_fixtures(teams, fixtures)
     event_code = render_event_code(event.event_id, classification.kind)
 
