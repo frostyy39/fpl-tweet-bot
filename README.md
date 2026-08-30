@@ -170,6 +170,37 @@ mode and is not connected to FPL event selection, deadline tweets, scheduling, p
 infrastructure, or deployment. **Do not use `--live` until the controlled test is separately
 approved.**
 
+## Durable Posting State
+
+The persistence layer stores one document per immutable FPL event at
+`fpl_event_posts/{event_id}`. Its explicit posting states are:
+
+```text
+unclaimed -> posting_claimed -> posting_in_progress -> succeeded | failed | uncertain
+```
+
+An event document may exist before posting with null posting fields while scheduling, deadline, and
+preflight metadata are reconciled. Reconciliation may update that metadata only while the event is
+unclaimed. A Firestore claim transaction either creates a claimed document when none exists or
+updates an existing unclaimed document whose event code and deadline metadata match. Concurrent
+transactions cannot both claim it. Once any posting status exists, another claim is denied; a
+mismatched deadline cannot mutate the claimed operation. The claim holder must transactionally
+persist `posting_in_progress` and a timezone-aware UTC attempt timestamp immediately before a
+future X request. Only that claim may record a terminal outcome.
+
+Each document retains the FPL event ID, event code, official UTC deadline, claim and attempt
+timestamps, posting status, successful X Post ID or safe failure details, plus nullable
+`scheduled_task_id`, `scheduled_task_status`, and `preflight_status` fields reserved for later
+milestones. This milestone does not populate those placeholders through scheduling behaviour.
+
+Firestore may retry a state transaction to resolve database contention; this never retries an X
+write. If claim, attempt, or outcome persistence is uncertain, callers fail closed and do not Post
+or reclaim automatically. The in-memory implementation provides the same transitions for
+deterministic tests, while production uses the `google-cloud-firestore` adapter. Unit tests require
+no Google credentials and make no Firestore requests. Error details are normalized to one line,
+limited to 2,000 characters, and rejected if they resemble authorization or credential material;
+callers should still supply concise, non-secret application errors.
+
 ## Requirements and Installation
 
 - Python 3.11 or newer
@@ -186,8 +217,11 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
-Runtime HTTP access uses the Python standard library. The only conditional runtime dependency
-is `tzdata`, used as the standard timezone database fallback on Windows.
+FPL and X HTTP access use the Python standard library. The only conditional runtime dependency is
+`tzdata`, used as the standard timezone database fallback on Windows. The Firestore production
+adapter uses Google's official Python client; creating its client will eventually require a Google
+Cloud project, a Firestore database, and Application Default Credentials. No cloud resources or
+credentials are required or provisioned in this milestone.
 
 ## Development Commands
 
