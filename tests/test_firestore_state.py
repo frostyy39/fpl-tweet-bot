@@ -174,6 +174,25 @@ def test_firestore_preexisting_unclaimed_document_is_claimed_transactionally() -
     assert persisted.status is PostingStatus.CLAIMED
 
 
+def test_firestore_unclaimed_scheduling_document_may_have_no_event_code() -> None:
+    store, client, _ = firestore_store()
+    context = EventPostingContext(
+        event_id=4,
+        event_code=None,
+        official_deadline_utc=DEADLINE_UTC,
+        scheduled_task_id="fpl-deterministic-task",
+        scheduled_task_status="armed",
+    )
+
+    record = store.reconcile_unclaimed_event(context)
+
+    assert record.status is None
+    assert record.context.event_code is None
+    persisted = client.collection_reference.documents["4"].data
+    assert persisted is not None
+    assert persisted["event_code"] is None
+
+
 def test_firestore_preclaim_deadline_metadata_can_be_reconciled() -> None:
     store, client, _ = firestore_store()
     store.reconcile_unclaimed_event(event_context())

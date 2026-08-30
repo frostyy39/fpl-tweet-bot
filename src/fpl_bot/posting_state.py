@@ -53,7 +53,7 @@ class EventPostingContext:
     """Event audit metadata that becomes immutable when posting is claimed."""
 
     event_id: int
-    event_code: str
+    event_code: str | None
     official_deadline_utc: datetime
     scheduled_task_id: str | None = None
     scheduled_task_status: str | None = None
@@ -66,13 +66,14 @@ class EventPostingContext:
             or self.event_id <= 0
         ):
             raise PostingStateValidationError("FPL event ID must be a positive integer")
-        match = (
-            EVENT_CODE_PATTERN.fullmatch(self.event_code)
-            if isinstance(self.event_code, str)
-            else None
-        )
-        if match is None or int(match.group(1)) != self.event_id:
-            raise PostingStateValidationError("Event code must match the FPL event ID")
+        if self.event_code is not None:
+            match = (
+                EVENT_CODE_PATTERN.fullmatch(self.event_code)
+                if isinstance(self.event_code, str)
+                else None
+            )
+            if match is None or int(match.group(1)) != self.event_id:
+                raise PostingStateValidationError("Event code must match the FPL event ID")
         require_utc(self.official_deadline_utc, "Official deadline")
         _validate_optional_text(self.scheduled_task_id, "Scheduled task ID")
         _validate_optional_text(self.scheduled_task_status, "Scheduled task status")
@@ -137,6 +138,8 @@ class PostingAuditRecord:
                     "Unclaimed event cannot contain posting claim or outcome fields"
                 )
             return
+        if self.context.event_code is None:
+            raise PostingStateValidationError("Claimed posting state requires an event code")
         if not isinstance(self.status, PostingStatus):
             raise PostingStateValidationError("Posting status is invalid")
         if self.claim_id is None or self.claimed_at_utc is None:

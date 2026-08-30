@@ -260,6 +260,58 @@ This pure planning layer reads bootstrap data only. It does not fetch fixtures, 
 claim posting state, call X, import Cloud Tasks, or implement Scheduler, Cloud Run, HTTP, retry, or
 deployment behavior.
 
+## Cloud Task Arming
+
+`DeadlineTaskArmer` accepts an already-approved `ScheduledDeadlineInstruction`; it does not fetch
+FPL or repeat the planner. When the deadline is still future, it first reconciles an unclaimed
+audit record to `arming`, confirms that posting has not concurrently been claimed, submits one
+named HTTP task, and records the result. At or after the deadline it records and returns
+`overdue_same_day` without calling Cloud Tasks, because Cloud Tasks replaces a past
+`schedule_time` with the current time rather than honestly retaining the official deadline.
+
+Task IDs use `fpl-` followed by the first 40 hexadecimal characters of SHA-256 over the canonical
+ASCII identity `fpl-deadline|event_id|official_deadline_utc`. The fixed domain separator is
+independent of the payload schema, so the same instruction keeps the same identity across
+processes and payload-version changes. The hash changes when either immutable value changes, is
+uniformly distributed, and uses only supported task-ID characters. The JSON body is independently
+versioned and contains exactly `version`, `expected_event_id`, and `expected_deadline_utc`. It has
+no event code, tweet, fixture data, posting state, credentials, or secrets. The submitted
+`schedule_time` equals the instruction's official UTC deadline exactly.
+
+The production adapter requires a project ID, region, queue ID, HTTPS execution URL, same-project
+task-caller service-account email, and optional HTTPS OIDC audience. It uses an authenticated HTTP
+POST target and the official Google Cloud Tasks client. No project-specific value is hardcoded.
+See Google's documentation for
+[HTTP task OIDC authentication](https://cloud.google.com/tasks/docs/creating-http-target-tasks)
+and [task naming, scheduling, and de-duplication](https://cloud.google.com/tasks/docs/reference/rpc/google.cloud.tasks.v2#createtaskrequest).
+
+The adapter disables client retries for each call. On `ALREADY_EXISTS`, it performs one `GetTask`
+with `FULL` view for the exact deterministic name and compares the name, schedule time, HTTP
+method, URL, payload, OIDC service-account email, and OIDC audience. Only an exact match is
+`already_armed`. `NOT_FOUND` means the name is retained but no task is currently confirmed, so the
+result is `task_name_reserved`; any definition mismatch is a fail-closed conflict. Neither case
+causes a random replacement name.
+
+A transport-ambiguous create performs the same single read-only reconciliation. An exact task is
+`reconciled_armed`; `NOT_FOUND` remains ambiguous, and a mismatch remains a conflict. A later
+checker invocation may retry only the same deterministic name. Definite failure is audited without
+an in-invocation retry. If a task is known to exist but final audit persistence fails, a typed
+error retains its non-secret task name and requires reconciliation—no second logical task is
+created.
+
+The eventual arming identity needs only narrowly scoped create and read access. Reconciliation
+requires `cloudtasks.tasks.get`; retrieving the payload with `FULL` view additionally requires
+`cloudtasks.tasks.fullView` on the queue, as documented for
+[`GetTask`](https://cloud.google.com/tasks/docs/reference/rest/v2/projects.locations.queues.tasks/get).
+Deployment must grant these alongside task creation and service-account impersonation permissions
+without granting queue-administration permissions.
+
+Scheduling metadata may exist before fixture classification, so an unclaimed audit record may
+temporarily have no event code. Live deadline execution still derives and reconciles the fresh
+event code before acquiring the posting claim. Once posting has any state, arming cannot mutate the
+record. This layer does not claim posting, call X, create queues, implement task handlers,
+Scheduler, Cloud Run, overdue recovery, cancellation, deployment, or provisioning.
+
 ## Requirements and Installation
 
 - Python 3.11 or newer
@@ -277,10 +329,11 @@ python -m pip install -e ".[dev]"
 ```
 
 FPL and X HTTP access use the Python standard library. The only conditional runtime dependency is
-`tzdata`, used as the standard timezone database fallback on Windows. The Firestore production
-adapter uses Google's official Python client; creating its client will eventually require a Google
-Cloud project, a Firestore database, and Application Default Credentials. No cloud resources or
-credentials are required or provisioned in this milestone.
+`tzdata`, used as the standard timezone database fallback on Windows. Firestore and Cloud Tasks
+production adapters use Google's official Python clients; creating their clients will eventually
+require a Google Cloud project and Application Default Credentials, plus a Firestore database or
+Cloud Tasks queue respectively. No cloud resources or credentials are required or provisioned in
+this milestone.
 
 ## Development Commands
 

@@ -84,6 +84,29 @@ def test_preexisting_unclaimed_event_can_be_claimed() -> None:
     assert decision.claim == PostingClaim(event_id=4, claim_id="claim-1")
 
 
+def test_unclaimed_scheduling_record_may_omit_event_code_until_live_revalidation() -> None:
+    store = InMemoryPostingStateStore(claim_id_factory=lambda: "claim-1")
+    scheduling_context = event_context(
+        event_code=None,
+        scheduled_task_id="fpl-deterministic-task",
+        scheduled_task_status="armed",
+    )
+
+    unclaimed = store.reconcile_unclaimed_event(scheduling_context)
+
+    assert unclaimed.status is None
+    assert unclaimed.context.event_code is None
+    with pytest.raises(PostingStateValidationError, match="requires an event code"):
+        store.claim_event(scheduling_context, claimed_at_utc=CLAIMED_AT_UTC)
+    with pytest.raises(PostingStateConflictError, match="reconcile before claiming"):
+        store.claim_event(event_context(), claimed_at_utc=CLAIMED_AT_UTC)
+
+    reconciled = store.reconcile_unclaimed_event(event_context())
+    decision = store.claim_event(event_context(), claimed_at_utc=CLAIMED_AT_UTC)
+    assert reconciled.context.event_code == "GW4"
+    assert decision.granted is True
+
+
 def test_in_progress_event_cannot_be_claimed_by_another_execution() -> None:
     store, _ = attempted_store()
 
