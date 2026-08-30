@@ -356,6 +356,43 @@ a duplicate. Google documents the acknowledgement behavior in the
 This is an injectable execution surface only. It has no global production app, deployment files,
 custom OIDC verification, Scheduler, overdue recovery, queue provisioning, or live-call command.
 
+## One-Run Deadline Checker
+
+`DeadlineChecker` represents one future periodic-checker invocation. It obtains a timezone-aware
+UTC check time, asks the existing `DeadlinePlanner` for the authoritative London-day decision, and
+passes the exact returned `ScheduledDeadlineInstruction` to the existing `DeadlineTaskArmer`.
+Neither the checker result nor the instruction contains an event code, tweet, fixture data, or
+classification. Production composition must inject the same UTC clock into the checker and its
+time-sensitive lower services; each lower layer continues to validate its own safety boundary.
+
+The orchestration outcomes are deliberately small:
+
+| Planning/arming outcome | Checker action/result |
+| --- | --- |
+| Deadline is not on the current London day | `no_action_not_today`; no arming or execution |
+| Task created | `task_armed`; no direct execution |
+| Existing task verified | `task_already_armed`; no direct execution |
+| Ambiguous creation reconciled to the same task | `task_reconciled_armed`; no direct execution |
+| Posting state already exists | `already_handled` or overdue `overdue_duplicate`; no direct execution |
+| Exact deadline reached or passed today | invoke the existing revalidator once |
+| Overdue Post succeeds | `overdue_executed` |
+| Overdue claim is denied | `overdue_duplicate` |
+| Overdue revalidation finds a changed/missing event | `stale`; no Post |
+| Temporary live-FPL or unconfirmed claim failure | `retryable_failure`; no in-run retry |
+| Known closed X/posting-state failure | `failed_closed`; no in-run retry |
+
+Only the armer's explicit `overdue_same_day` result selects direct recovery. Task creation
+rejection, a reserved name, definition conflict, unresolved create/reconciliation outcome, or audit
+persistence failure propagates its existing typed error and never invokes posting directly. A
+later checker run may re-enter the same deterministic task identity; this checker adds no loop.
+
+An exact-deadline task and overdue recovery may race safely. Both paths use the same immutable
+instruction, re-fetch live FPL data, and meet at the existing event-level atomic posting claim. The
+winner can make the one X write; the other receives the durable duplicate result. Repeated overdue
+runs after success therefore make zero additional X requests. This module adds no Scheduler,
+checker endpoint, process loop, Cloud Run deployment, task creation implementation, or cloud
+provisioning.
+
 ## Requirements and Installation
 
 - Python 3.11 or newer
