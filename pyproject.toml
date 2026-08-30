@@ -9,6 +9,7 @@ description = "Deterministic Fantasy Premier League deadline tweet automation co
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "flask>=3.1,<4",
     "google-cloud-firestore>=2.29,<3",
     "google-cloud-tasks>=2.24,<3",
     "tzdata>=2025.2; platform_system == 'Windows'",

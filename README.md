@@ -312,6 +312,50 @@ event code before acquiring the posting claim. Once posting has any state, armin
 record. This layer does not claim posting, call X, create queues, implement task handlers,
 Scheduler, Cloud Run, overdue recovery, cancellation, deployment, or provisioning.
 
+## Deadline Task HTTP Handler
+
+The deadline-task surface exposes only `POST /tasks/deadline`. A framework-neutral handler parses
+the existing versioned Cloud Tasks payload and invokes the injected `DeadlineExecutionRevalidator`;
+a thin Flask application factory adapts that result to HTTP. The factory constructs no FPL,
+Firestore, X, or Google Cloud client, so tests and imports have no network or credential side
+effects. A later deployment composition root will inject the existing production adapters rather
+than duplicating them. Flask is the only dependency added for this surface because it provides a
+small conventional Cloud Run-compatible request adapter and deterministic local test client.
+
+Authentication remains outside application code. The intended Cloud Run service is private, the
+Cloud Task carries its configured Google-signed OIDC identity, and only the designated task-caller
+service account receives `roles/run.invoker`. Cloud Run and IAM reject unauthorized traffic before
+the request reaches the container; the application does not parse or verify JWTs and never treats
+`X-CloudTasks-*` headers as event identity. This milestone documents but does not provision that
+boundary. See Google's guidance for
+[authenticated Cloud Run service-to-service requests](https://cloud.google.com/run/docs/authenticating/service-to-service).
+
+Cloud Tasks removes an HTTP task after a `2xx` response and retries non-`2xx` or missing responses.
+The handler deliberately uses only these statuses:
+
+| HTTP | Result | Meaning |
+| --- | --- | --- |
+| `200` | `posted` | The Post succeeded and durable success was recorded. |
+| `200` | `duplicate` | Posting state already exists; no new X write occurred. |
+| `200` | `stale` | Live FPL proves the event is missing or its deadline changed. |
+| `200` | `invalid_task_payload` | Malformed, unsupported, non-UTC, or extra payload data is permanently invalid. |
+| `200` | `failed_closed` | A definite/ambiguous X outcome or post-claim persistence problem left the event closed. |
+| `503` | `retryable` | Early delivery, unavailable/invalid live FPL data, an unconfirmed atomic claim outcome, or an unknown failure may safely be delivered again. |
+
+The JSON response contains only the `result` value—never exception text, credentials, headers, or
+OAuth material. A valid body contains exactly `version`, `expected_event_id`, and
+`expected_deadline_utc`; the event code and tweet remain live-derived. Invalid bodies never invoke
+the revalidator. Known X failures are acknowledged only after the existing coordinator has closed
+durable state, so Cloud Tasks cannot become an X retry loop. If a successful HTTP response is lost,
+redelivery reaches the same event-level atomic claim and returns `duplicate` without a second X
+write. An unconfirmed claim transaction is not described as cleanly pre-claim: redelivery either
+makes progress if no claim committed or observes the same event's committed claim and terminates as
+a duplicate. Google documents the acknowledgement behavior in the
+[Cloud Tasks HTTP request reference](https://cloud.google.com/tasks/docs/reference/rest/v2/projects.locations.queues.tasks).
+
+This is an injectable execution surface only. It has no global production app, deployment files,
+custom OIDC verification, Scheduler, overdue recovery, queue provisioning, or live-call command.
+
 ## Requirements and Installation
 
 - Python 3.11 or newer
@@ -328,12 +372,12 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
-FPL and X HTTP access use the Python standard library. The only conditional runtime dependency is
-`tzdata`, used as the standard timezone database fallback on Windows. Firestore and Cloud Tasks
-production adapters use Google's official Python clients; creating their clients will eventually
-require a Google Cloud project and Application Default Credentials, plus a Firestore database or
-Cloud Tasks queue respectively. No cloud resources or credentials are required or provisioned in
-this milestone.
+FPL and X HTTP access use the Python standard library. The conditional `tzdata` dependency is the
+standard timezone database fallback on Windows. Firestore and Cloud Tasks production adapters use
+Google's official Python clients, while Flask supplies the injectable HTTP route adapter. Creating
+the Google clients will eventually require a Google Cloud project and Application Default
+Credentials, plus a Firestore database or Cloud Tasks queue respectively. No cloud resources or
+credentials are required or provisioned in this milestone.
 
 ## Development Commands
 

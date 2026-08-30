@@ -3,6 +3,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 
 from fpl_bot.classification import render_event_code
 from fpl_bot.errors import FplBotError
@@ -28,8 +29,20 @@ class DeadlinePostValidationError(DeadlinePostExecutionError):
     """Raised before claiming when the resolved event report is inconsistent."""
 
 
+class PostingStatePersistenceStage(StrEnum):
+    """State operation whose durable outcome could not be confirmed."""
+
+    CLAIM_OUTCOME_UNCONFIRMED = "claim_outcome_unconfirmed"
+    CLAIM_RESPONSE_INVALID = "claim_response_invalid"
+    POSTING_ATTEMPT_UNCONFIRMED = "posting_attempt_unconfirmed"
+
+
 class PostingStatePersistenceError(DeadlinePostExecutionError):
     """Raised when a required pre-write state transition cannot be confirmed."""
+
+    def __init__(self, message: str, *, stage: PostingStatePersistenceStage) -> None:
+        super().__init__(message)
+        self.stage = stage
 
 
 class XPostSuccessPersistenceError(DeadlinePostExecutionError):
@@ -101,7 +114,8 @@ class DeadlinePostExecutionCoordinator:
             )
         except Exception as exc:
             raise PostingStatePersistenceError(
-                "Durable posting claim could not be confirmed; no X request was made"
+                "Durable posting claim could not be confirmed; no X request was made",
+                stage=PostingStatePersistenceStage.CLAIM_OUTCOME_UNCONFIRMED,
             ) from exc
 
         if not decision.granted:
@@ -114,7 +128,8 @@ class DeadlinePostExecutionCoordinator:
         claim = decision.claim
         if claim is None or claim.event_id != context.event_id:
             raise PostingStatePersistenceError(
-                "Durable posting claim response was inconsistent; no X request was made"
+                "Durable posting claim response was inconsistent; no X request was made",
+                stage=PostingStatePersistenceStage.CLAIM_RESPONSE_INVALID,
             )
 
         attempted_at_utc = self._validated_now("Posting attempt timestamp")
@@ -126,7 +141,8 @@ class DeadlinePostExecutionCoordinator:
         except Exception as exc:
             raise PostingStatePersistenceError(
                 "Posting claim was acquired, but posting_in_progress could not be confirmed; "
-                "no X request was made"
+                "no X request was made",
+                stage=PostingStatePersistenceStage.POSTING_ATTEMPT_UNCONFIRMED,
             ) from exc
 
         try:

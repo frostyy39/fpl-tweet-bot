@@ -330,6 +330,47 @@ def serialize_instruction(instruction: ScheduledDeadlineInstruction) -> bytes:
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+def parse_instruction_payload(payload: bytes) -> ScheduledDeadlineInstruction:
+    """Strictly parse the versioned immutable instruction carried by Cloud Tasks."""
+    if not isinstance(payload, bytes) or not payload:
+        raise CloudTaskValidationError("Cloud Task payload must be non-empty bytes")
+    try:
+        decoded = payload.decode("utf-8")
+        raw = json.loads(decoded, object_pairs_hook=_object_without_duplicate_keys)
+    except (UnicodeDecodeError, json.JSONDecodeError, CloudTaskValidationError) as exc:
+        raise CloudTaskValidationError("Cloud Task payload must be valid JSON") from exc
+
+    expected_keys = {"version", "expected_event_id", "expected_deadline_utc"}
+    if not isinstance(raw, dict) or set(raw) != expected_keys:
+        raise CloudTaskValidationError(
+            "Cloud Task payload must contain exactly the supported instruction fields"
+        )
+    version = raw["version"]
+    if isinstance(version, bool) or not isinstance(version, int) or version != PAYLOAD_VERSION:
+        raise CloudTaskValidationError("Cloud Task payload version is unsupported")
+    deadline_value = raw["expected_deadline_utc"]
+    if not isinstance(deadline_value, str):
+        raise CloudTaskValidationError("Cloud Task deadline must be a UTC timestamp string")
+    try:
+        deadline = datetime.fromisoformat(deadline_value.replace("Z", "+00:00"))
+        require_utc(deadline, "Scheduled deadline")
+        return ScheduledDeadlineInstruction(
+            expected_event_id=raw["expected_event_id"],
+            expected_deadline_utc=deadline,
+        )
+    except (ValueError, TypeError, PostingStateValidationError, FplBotError) as exc:
+        raise CloudTaskValidationError("Cloud Task instruction identity is invalid") from exc
+
+
+def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise CloudTaskValidationError("Cloud Task payload contains duplicate fields")
+        result[key] = value
+    return result
+
+
 def _require_instruction(instruction: ScheduledDeadlineInstruction) -> None:
     if not isinstance(instruction, ScheduledDeadlineInstruction):
         raise CloudTaskValidationError("Cloud Task requires a ScheduledDeadlineInstruction")
