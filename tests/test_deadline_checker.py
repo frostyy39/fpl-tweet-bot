@@ -38,6 +38,10 @@ from fpl_bot.posting_state import (
     InMemoryPostingStateStore,
     PostingStatus,
 )
+from fpl_bot.preflight_arming import (
+    PreflightTaskArmingResult,
+    PreflightTaskArmingStatus,
+)
 from fpl_bot.task_arming import (
     TaskArmingAuditPersistenceError,
     TaskArmingResult,
@@ -133,6 +137,22 @@ class FakeExecutor:
         return self.outcome
 
 
+class FakePreflightArmer:
+    def __init__(self, outcome: PreflightTaskArmingStatus | Exception) -> None:
+        self.outcome = outcome
+        self.instructions: list[ScheduledDeadlineInstruction] = []
+
+    def arm(self, instruction: ScheduledDeadlineInstruction) -> PreflightTaskArmingResult:
+        self.instructions.append(instruction)
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return PreflightTaskArmingResult(
+            instruction=instruction,
+            task_name=f"{TASK_NAME}-preflight",
+            status=self.outcome,
+        )
+
+
 class StaticFplSource:
     def fetch_bootstrap_static(self) -> Mapping[str, Any]:
         return bootstrap_payload()
@@ -206,13 +226,20 @@ def make_checker(
     *,
     now: datetime,
     events: list[str] | None = None,
+    preflight_armer: FakePreflightArmer | None = None,
 ) -> DeadlineChecker:
     def clock() -> datetime:
         if events is not None:
             events.append("clock")
         return now
 
-    return DeadlineChecker(planner, armer, executor, clock=clock)
+    return DeadlineChecker(
+        planner,
+        armer,
+        executor,
+        preflight_task_armer=preflight_armer,
+        clock=clock,
+    )
 
 
 def bootstrap_payload() -> dict[str, Any]:
@@ -299,6 +326,79 @@ def test_successful_future_arming_finishes_without_direct_execution(
     assert result.instruction is planned
     assert armer.instructions == [planned]
     assert executor.instructions == []
+
+
+@pytest.mark.parametrize(
+    "preflight_status",
+    [
+        PreflightTaskArmingStatus.SCHEDULED,
+        PreflightTaskArmingStatus.ALREADY_SCHEDULED,
+        PreflightTaskArmingStatus.RECONCILED_SCHEDULED,
+        PreflightTaskArmingStatus.TOO_LATE,
+    ],
+)
+def test_future_deadline_arms_preflight_without_direct_execution(
+    preflight_status: PreflightTaskArmingStatus,
+) -> None:
+    planned = instruction()
+    preflight = FakePreflightArmer(preflight_status)
+    executor = FakeExecutor(posted_result())
+
+    result = make_checker(
+        FakePlanner(eligible(planned)),
+        FakeArmer(TaskArmingStatus.ARMED),
+        executor,
+        now=BEFORE_DEADLINE_UTC,
+        preflight_armer=preflight,
+    ).run()
+
+    assert result.status is DeadlineCheckerStatus.TASK_ARMED
+    assert result.preflight_status is preflight_status
+    assert result.preflight_failure_type is None
+    assert preflight.instructions == [planned]
+    assert executor.instructions == []
+
+
+def test_preflight_arming_failure_is_reported_without_undoing_final_task() -> None:
+    planned = instruction()
+    preflight = FakePreflightArmer(RuntimeError("preflight unavailable"))
+    executor = FakeExecutor(posted_result())
+
+    result = make_checker(
+        FakePlanner(eligible(planned)),
+        FakeArmer(TaskArmingStatus.ARMED),
+        executor,
+        now=BEFORE_DEADLINE_UTC,
+        preflight_armer=preflight,
+    ).run()
+
+    assert result.status is DeadlineCheckerStatus.TASK_ARMED
+    assert result.preflight_status is None
+    assert result.preflight_failure_type == "RuntimeError"
+    assert preflight.instructions == [planned]
+    assert executor.instructions == []
+
+
+def test_not_today_and_overdue_paths_never_arm_preflight() -> None:
+    preflight = FakePreflightArmer(PreflightTaskArmingStatus.SCHEDULED)
+    no_action = make_checker(
+        FakePlanner(not_today()),
+        FakeArmer(TaskArmingStatus.ARMED),
+        FakeExecutor(posted_result()),
+        now=BEFORE_DEADLINE_UTC,
+        preflight_armer=preflight,
+    ).run()
+    overdue = make_checker(
+        FakePlanner(eligible()),
+        FakeArmer(TaskArmingStatus.OVERDUE_SAME_DAY),
+        FakeExecutor(posted_result()),
+        now=AFTER_DEADLINE_UTC,
+        preflight_armer=preflight,
+    ).run()
+
+    assert no_action.status is DeadlineCheckerStatus.NO_ACTION_NOT_TODAY
+    assert overdue.status is DeadlineCheckerStatus.OVERDUE_EXECUTED
+    assert preflight.instructions == []
 
 
 @pytest.mark.parametrize("now", [DEADLINE_UTC, AFTER_DEADLINE_UTC])

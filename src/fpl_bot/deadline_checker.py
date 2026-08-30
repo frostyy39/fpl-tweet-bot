@@ -25,6 +25,7 @@ from fpl_bot.post_execution import (
     XPostSuccessPersistenceError,
 )
 from fpl_bot.posting_state import PostingStateValidationError, PostingStatus, require_utc
+from fpl_bot.preflight_arming import PreflightTaskArmingResult, PreflightTaskArmingStatus
 from fpl_bot.task_arming import TaskArmingResult, TaskArmingStatus
 from fpl_bot.x_errors import XApiError
 
@@ -59,6 +60,8 @@ class DeadlineCheckerResult:
     instruction: ScheduledDeadlineInstruction | None = None
     existing_posting_status: PostingStatus | None = None
     failure_type: str | None = None
+    preflight_status: PreflightTaskArmingStatus | None = None
+    preflight_failure_type: str | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -91,6 +94,21 @@ class DeadlineCheckerResult:
             raise DeadlineCheckerValidationError(
                 "Only failure results require a non-secret failure type"
             )
+        final_task_success = self.status in {
+            DeadlineCheckerStatus.TASK_ARMED,
+            DeadlineCheckerStatus.TASK_ALREADY_ARMED,
+            DeadlineCheckerStatus.TASK_RECONCILED_ARMED,
+        }
+        if (self.preflight_status is not None or self.preflight_failure_type is not None) and not (
+            final_task_success
+        ):
+            raise DeadlineCheckerValidationError(
+                "Preflight arming details require a successful final-task outcome"
+            )
+        if self.preflight_status is not None and self.preflight_failure_type is not None:
+            raise DeadlineCheckerValidationError(
+                "Preflight arming cannot be both successful and failed"
+            )
 
 
 class DeadlinePlannerBoundary(Protocol):
@@ -108,6 +126,13 @@ class DeadlineExecutionBoundary(Protocol):
     ) -> DeadlinePostExecutionResult: ...
 
 
+class PreflightTaskArmerBoundary(Protocol):
+    def arm(
+        self,
+        instruction: ScheduledDeadlineInstruction,
+    ) -> PreflightTaskArmingResult: ...
+
+
 Clock = Callable[[], datetime]
 
 
@@ -120,11 +145,13 @@ class DeadlineChecker:
         task_armer: DeadlineTaskArmerBoundary,
         execution_revalidator: DeadlineExecutionBoundary,
         *,
+        preflight_task_armer: PreflightTaskArmerBoundary | None = None,
         clock: Clock | None = None,
     ) -> None:
         self._planner = planner
         self._task_armer = task_armer
         self._execution_revalidator = execution_revalidator
+        self._preflight_task_armer = preflight_task_armer
         self._clock = clock or _utc_now
 
     def run(self) -> DeadlineCheckerResult:
@@ -161,15 +188,19 @@ class DeadlineChecker:
             )
 
         if arming.status is TaskArmingStatus.ARMED:
-            return _success_result(DeadlineCheckerStatus.TASK_ARMED, checked_at_utc, instruction)
+            return self._final_task_result(
+                DeadlineCheckerStatus.TASK_ARMED,
+                checked_at_utc,
+                instruction,
+            )
         if arming.status is TaskArmingStatus.ALREADY_ARMED:
-            return _success_result(
+            return self._final_task_result(
                 DeadlineCheckerStatus.TASK_ALREADY_ARMED,
                 checked_at_utc,
                 instruction,
             )
         if arming.status is TaskArmingStatus.RECONCILED_ARMED:
-            return _success_result(
+            return self._final_task_result(
                 DeadlineCheckerStatus.TASK_RECONCILED_ARMED,
                 checked_at_utc,
                 instruction,
@@ -189,6 +220,34 @@ class DeadlineChecker:
         if arming.status is not TaskArmingStatus.OVERDUE_SAME_DAY:
             raise DeadlineCheckerValidationError("Task armer returned an unknown outcome")
         return self._execute_overdue(instruction, checked_at_utc)
+
+    def _final_task_result(
+        self,
+        status: DeadlineCheckerStatus,
+        checked_at_utc: datetime,
+        instruction: ScheduledDeadlineInstruction,
+    ) -> DeadlineCheckerResult:
+        if self._preflight_task_armer is None:
+            return _success_result(status, checked_at_utc, instruction)
+        try:
+            preflight = self._preflight_task_armer.arm(instruction)
+            if preflight.instruction is not instruction:
+                raise DeadlineCheckerValidationError(
+                    "Preflight armer did not preserve the planned scheduled instruction"
+                )
+        except Exception as exc:
+            return DeadlineCheckerResult(
+                status=status,
+                checked_at_utc=checked_at_utc,
+                instruction=instruction,
+                preflight_failure_type=type(exc).__name__,
+            )
+        return DeadlineCheckerResult(
+            status=status,
+            checked_at_utc=checked_at_utc,
+            instruction=instruction,
+            preflight_status=preflight.status,
+        )
 
     def _execute_overdue(
         self,

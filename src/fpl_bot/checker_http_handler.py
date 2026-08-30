@@ -21,6 +21,7 @@ class CheckerHttpResult(StrEnum):
     DUPLICATE = "duplicate"
     STALE = "stale"
     FAILED_CLOSED = "failed_closed"
+    PREFLIGHT_FAILED = "preflight_failed"
     RETRYABLE = "retryable"
 
 
@@ -55,10 +56,16 @@ _ACKNOWLEDGED_RESULTS = {
 def handle_checker_run(checker: DeadlineCheckerBoundary) -> CheckerHttpResponse:
     """Run the checker once and select acknowledgement versus later delivery retry."""
     try:
-        status = checker.run().status
+        outcome = checker.run()
     except Exception:
         return _retry()
 
+    if outcome.preflight_failure_type is not None:
+        return CheckerHttpResponse(
+            CHECKER_RETRYABLE_HTTP_STATUS,
+            CheckerHttpResult.PREFLIGHT_FAILED,
+        )
+    status = outcome.status
     if status is DeadlineCheckerStatus.RETRYABLE_FAILURE:
         return _retry()
     result = _ACKNOWLEDGED_RESULTS.get(status)

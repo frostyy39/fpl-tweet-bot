@@ -194,6 +194,22 @@ def test_retryable_checker_outcome_returns_503() -> None:
     assert response.json_body() == {"result": CheckerHttpResult.RETRYABLE.value}
 
 
+def test_preflight_arming_failure_is_distinct_and_retryable_without_error_text() -> None:
+    result = checker_result(DeadlineCheckerStatus.TASK_ARMED)
+    result = DeadlineCheckerResult(
+        result.status,
+        result.checked_at_utc,
+        result.instruction,
+        preflight_failure_type="SensitiveProviderException",
+    )
+
+    response = handle_checker_run(FakeChecker(result))
+
+    assert response.status_code == CHECKER_RETRYABLE_HTTP_STATUS
+    assert response.json_body() == {"result": CheckerHttpResult.PREFLIGHT_FAILED.value}
+    assert b"SensitiveProviderException" not in json.dumps(response.json_body()).encode()
+
+
 def test_unknown_exception_is_retryable_and_response_is_redacted() -> None:
     secret = "Authorization: Bearer should-never-be-returned"
 

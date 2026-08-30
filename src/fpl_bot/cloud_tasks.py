@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Protocol
 from urllib.parse import urlsplit
@@ -26,6 +26,8 @@ from fpl_bot.posting_state import PostingStateValidationError, require_utc
 
 PAYLOAD_VERSION = 1
 TASK_ID_DOMAIN = "fpl-deadline"
+PREFLIGHT_TASK_ID_DOMAIN = "fpl-preflight"
+PREFLIGHT_LEAD_TIME = timedelta(minutes=5)
 TASK_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,500}\Z")
 RESOURCE_ID_PATTERN = re.compile(r"[A-Za-z0-9-]+\Z")
 PROJECT_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]*\Z")
@@ -311,13 +313,41 @@ class GoogleCloudTasksAdapter:
         )
 
 
+class GooglePreflightCloudTasksAdapter(GoogleCloudTasksAdapter):
+    """Reuse the safe Cloud Tasks transport for the distinct preflight task definition."""
+
+    def build_task(
+        self,
+        instruction: ScheduledDeadlineInstruction,
+    ) -> CloudTaskDefinition:
+        task_id = deterministic_preflight_task_id(instruction)
+        return CloudTaskDefinition(
+            task_id=task_id,
+            task_name=self._config.task_name(task_id),
+            schedule_time_utc=instruction.expected_deadline_utc - PREFLIGHT_LEAD_TIME,
+            payload=serialize_instruction(instruction),
+        )
+
+
 def deterministic_task_id(instruction: ScheduledDeadlineInstruction) -> str:
+    return _deterministic_task_id(instruction, TASK_ID_DOMAIN, "fpl")
+
+
+def deterministic_preflight_task_id(instruction: ScheduledDeadlineInstruction) -> str:
+    return _deterministic_task_id(instruction, PREFLIGHT_TASK_ID_DOMAIN, "fpl-preflight")
+
+
+def _deterministic_task_id(
+    instruction: ScheduledDeadlineInstruction,
+    identity_domain: str,
+    prefix: str,
+) -> str:
     _require_instruction(instruction)
     identity = (
-        f"{TASK_ID_DOMAIN}|{instruction.expected_event_id}|"
+        f"{identity_domain}|{instruction.expected_event_id}|"
         f"{_format_utc(instruction.expected_deadline_utc)}"
     ).encode("ascii")
-    return f"fpl-{hashlib.sha256(identity).hexdigest()[:40]}"
+    return f"{prefix}-{hashlib.sha256(identity).hexdigest()[:40]}"
 
 
 def serialize_instruction(instruction: ScheduledDeadlineInstruction) -> bytes:

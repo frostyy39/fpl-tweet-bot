@@ -411,6 +411,34 @@ on IAM, with only the future Scheduler caller granted invocation permission. The
 cadence is once daily at `06:00 Europe/London`; no Scheduler resource, cron/process loop, IAM rule,
 deployment, or live dependency composition is included yet.
 
+## Five-Minute Preflight
+
+For a future same-day deadline, the checker first ensures the exact-deadline task and then asks the
+preflight armer to create a second task at exactly `official_deadline - 5 minutes`. Its ID is
+`fpl-preflight-<sha256-prefix>`, derived deterministically from the event ID and official UTC
+deadline, while the final task retains its separate `fpl-<sha256-prefix>` identity. Both carry only
+the existing versioned event-ID/deadline payload. If the preflight time is reached or passed, no
+past task is created; the final task remains valid. A preflight arming failure does not undo a
+confirmed final task and is reported as the retryable, non-secret `preflight_failed` checker result.
+
+`DeadlinePreflight` is structurally read-only with respect to X. It receives only the FPL read
+boundary, an audit-only state surface, and final/preflight task armers. It has no posting claim,
+post-execution coordinator, deadline execution revalidator, X creator, or dry-run switch. It fetches
+fresh bootstrap events, validates the exact event and official deadline, records audit status, and
+never fetches fixtures or renders a tweet.
+
+The strict `POST /tasks/preflight` route uses the same immutable payload parser as
+`POST /tasks/deadline`; invalid payloads are terminal and invoke no preflight logic. An unchanged
+deadline records `preflight_passed` only before that deadline. A delayed delivery at or after an
+unchanged deadline records terminal `preflight_too_late` without changing or inhibiting the final
+deadline task; late final-task execution retains its independent live revalidation semantics. A
+changed deadline later or earlier on the same London day is re-armed only while still future, with
+a new deterministic final task and a new preflight where its five-minute time remains schedulable.
+An already-reached changed deadline never invokes overdue posting recovery. A deadline moved to
+another London day is marked stale for the normal daily checker. Claimed posting records remain
+immutable. Cloud Run/IAM remains the authentication boundary; no Scheduler, deployment, IAM,
+queue, or Firestore provisioning is included.
+
 ## Requirements and Installation
 
 - Python 3.11 or newer

@@ -19,6 +19,8 @@ from fpl_bot.cloud_tasks import (
     CloudTasksConfig,
     CloudTaskValidationError,
     GoogleCloudTasksAdapter,
+    GooglePreflightCloudTasksAdapter,
+    deterministic_preflight_task_id,
     deterministic_task_id,
     serialize_instruction,
 )
@@ -71,6 +73,16 @@ def config() -> CloudTasksConfig:
     )
 
 
+def preflight_config() -> CloudTasksConfig:
+    return CloudTasksConfig(
+        project_id="fpl-bot-test",
+        location_id="europe-west2",
+        queue_id="deadline-posts",
+        execution_url="https://fpl-bot-test-abc.europe-west2.run.app/tasks/preflight",
+        service_account_email="task-caller@fpl-bot-test.iam.gserviceaccount.com",
+    )
+
+
 def test_deterministic_task_id_is_stable_and_cloud_tasks_safe() -> None:
     first = deterministic_task_id(instruction())
     second = deterministic_task_id(instruction())
@@ -88,6 +100,49 @@ def test_changed_deadline_changes_task_id() -> None:
 
 def test_changed_event_id_changes_task_id() -> None:
     assert deterministic_task_id(instruction()) != deterministic_task_id(instruction(event_id=4))
+
+
+def test_preflight_task_identity_is_stable_distinct_and_changes_with_instruction() -> None:
+    task_id = deterministic_preflight_task_id(instruction())
+
+    assert task_id == deterministic_preflight_task_id(instruction())
+    assert task_id != deterministic_task_id(instruction())
+    assert task_id.startswith("fpl-preflight-")
+    assert re.fullmatch(r"[A-Za-z0-9_-]{1,500}", task_id)
+    assert task_id != deterministic_preflight_task_id(instruction(event_id=4))
+    assert task_id != deterministic_preflight_task_id(
+        instruction(deadline=DEADLINE_UTC + timedelta(minutes=30))
+    )
+
+
+def test_preflight_adapter_schedules_exactly_five_minutes_early_with_same_payload() -> None:
+    client = FakeCloudTasksClient()
+    adapter = GooglePreflightCloudTasksAdapter(preflight_config(), client)
+    definition = adapter.build_task(instruction())
+
+    result = adapter.create_task(definition)
+
+    assert result is CloudTaskCreateDisposition.CREATED
+    assert definition.schedule_time_utc == DEADLINE_UTC - timedelta(minutes=5)
+    assert definition.payload == serialize_instruction(instruction())
+    task = client.calls[0][0]["task"]
+    assert task.name.endswith(f"/tasks/{deterministic_preflight_task_id(instruction())}")
+    assert task.schedule_time == DEADLINE_UTC - timedelta(minutes=5)
+    assert task.http_request.url == preflight_config().execution_url
+
+
+def test_duplicate_preflight_task_uses_existing_get_task_verification() -> None:
+    client = FakeCloudTasksClient(AlreadyExists("duplicate"))
+    adapter = GooglePreflightCloudTasksAdapter(preflight_config(), client)
+    definition = adapter.build_task(instruction())
+    client.get_effect = adapter._api_task(definition)
+
+    result = adapter.create_task(definition)
+
+    assert result is CloudTaskCreateDisposition.ALREADY_EXISTS
+    assert len(client.calls) == 1
+    assert len(client.get_calls) == 1
+    assert client.calls[0][0]["task"].name == definition.task_name
 
 
 def test_task_identity_is_independent_of_payload_schema_version(
