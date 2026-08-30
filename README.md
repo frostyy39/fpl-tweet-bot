@@ -237,6 +237,29 @@ the same way; claimed metadata remains immutable and fail-closed.
 This layer receives no cached event code or tweet and has no task creation, scheduler, HTTP
 endpoint, retry, cloud provisioning, or deployment behavior.
 
+## Deadline Planning
+
+`DeadlinePlanner` fetches fresh FPL bootstrap data and reuses the Milestone 1 event parser and
+chronology-safe selector. To avoid inventing a minute-based lateness cutoff, a single authoritative
+event whose official deadline is on the current London date remains the planning candidate even
+after its deadline time; when there is no current-day event, the existing selector chooses the
+current/future event unchanged. Multiple current-day deadlines are treated as contradictory. The
+planner converts both the injected current time and selected deadline to `Europe/London` with the
+standard timezone database, then compares only their local calendar dates. A matching date returns
+the existing immutable `ScheduledDeadlineInstruction`; a different date returns an explicit
+no-arm decision.
+
+The instruction contains only the authoritative event ID and exact timezone-aware UTC deadline.
+It carries no event code or tweet, and downstream execution still re-fetches and revalidates both
+identity values before any posting activity. Invalid, unavailable, or contradictory FPL data
+raises the existing typed failures rather than manufacturing an instruction. The planner adds no
+maximum-lateness rule: its date decision alone does not reject a selected deadline merely because
+the time has passed.
+
+This pure planning layer reads bootstrap data only. It does not fetch fixtures, create tasks,
+claim posting state, call X, import Cloud Tasks, or implement Scheduler, Cloud Run, HTTP, retry, or
+deployment behavior.
+
 ## Requirements and Installation
 
 - Python 3.11 or newer
