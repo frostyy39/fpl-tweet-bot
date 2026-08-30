@@ -46,13 +46,13 @@ class XHttpRequest:
     method: str
     url: str
     headers: Mapping[str, str] = field(repr=False)
-    body: bytes | None = None
+    body: bytes | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
 class XHttpResponse:
     status_code: int
-    body: bytes
+    body: bytes = field(repr=False)
 
 
 class XHttpTransport(Protocol):
@@ -114,7 +114,7 @@ class XApiClient:
             raise ValueError("timeout_seconds must be greater than zero")
         self._config = config
         self._timeout_seconds = timeout_seconds
-        self._transport = transport or UrllibXHttpTransport()
+        self._transport = transport if transport is not None else UrllibXHttpTransport()
 
     def get_authenticated_user(self) -> AuthenticatedXUser:
         token = self._config.require_user_access_token()

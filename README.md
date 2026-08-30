@@ -78,10 +78,63 @@ requests never follow HTTP redirects, so bearer credentials cannot be forwarded 
 destination. An unexpected read redirect is a typed API failure; an unexpected create-Post
 redirect or HTTP 408 is an ambiguous write outcome.
 
+## Milestone 2B: Local Test-Account Authorization Helper
+
+Milestone 2B adds a local OAuth 2.0 Authorization Code with PKCE helper. It requests exactly
+`tweet.read users.read tweet.write offline.access`, generates a fresh cryptographic state and S256
+PKCE challenge, and listens only at the registered callback
+`http://127.0.0.1:8765/callback`. It validates state before exchanging the short-lived code and
+handles denial callbacks without echoing provider-supplied details.
+
+For the configured confidential client, the helper follows X's current
+[user access-token guide](https://docs.x.com/fundamentals/authentication/oauth-2-0/user-access-token):
+it authenticates the token request with HTTP Basic Client ID/Client Secret and posts the code,
+`authorization_code` grant, exact redirect URI, and PKCE verifier to
+`https://api.x.com/2/oauth2/token`. It requires both an access token and refresh token, then calls
+only `GET /2/users/me`. It never enables posting or calls `POST /2/tweets`.
+
+The helper reads these names from the process environment. Do not put their values in Git, a
+`.env` file, command arguments, shell history, or screenshots:
+
+| Name | Purpose |
+| --- | --- |
+| `X_OAUTH_CLIENT_ID` | Confidential OAuth 2.0 Client ID. |
+| `X_OAUTH_CLIENT_SECRET` | Confidential OAuth 2.0 Client Secret. |
+| `X_OAUTH_TOKEN_OUTPUT_FILE` | New absolute encrypted handoff file path outside this repository. |
+
+The output file must not already exist. For the real Windows run, the complete JSON handoff is
+encrypted in memory with Windows DPAPI before the file is created. DPAPI uses the current Windows
+user context; the helper never writes a plaintext token file. The file contains only a format
+marker and ciphertext, cannot be moved to another Windows user as a portable secret, and remains
+outside Git. Encryption or persistence failure creates no usable handoff and fails closed.
+
+Non-Windows development retains an exclusively created plaintext handoff with POSIX mode `0600`,
+but that path is not used for the actual Windows Milestone 2B authorization. Neither path is
+production persistence.
+
+When explicitly approved for a real test-account authorization, run one of:
+
+```bash
+python -m fpl_bot.x_oauth_cli
+# Or, after installation:
+fpl-bot-x-authorize
+```
+
+The browser opens automatically; the authorization URL is not printed. Successful terminal output
+contains only the authenticated numeric user ID, username, generic handoff confirmation, and a
+reminder that posting remains disabled. **Do not run this helper until the controlled real OAuth
+authorization is explicitly approved.**
+
+The first authorization does not require a pre-known numeric account ID. After token acquisition,
+the helper performs only the read-only `/2/users/me` request and prints its numeric user ID and
+username. Manually confirm that identity is the dedicated private test account. Its numeric ID then
+becomes the canonical `X_EXPECTED_USER_ID` for the later controlled Post; obtaining it does not
+enable posting.
+
 ## Requirements and Installation
 
 - Python 3.11 or newer
-- Internet access only for the live dry run
+- Internet access only for the live dry run or an explicitly initiated OAuth helper
 
 Create a virtual environment and install the package with development tools:
 

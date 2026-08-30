@@ -53,3 +53,23 @@ class XIdentityMismatchError(XApiError):
 
 class XAmbiguousWriteError(XApiError):
     """Raised when a Post might exist but no safe success result is available."""
+
+
+class XOAuthError(XApiError):
+    """Base class for safe local OAuth authorization failures."""
+
+
+class XOAuthConfigurationError(XOAuthError):
+    """Raised when local OAuth configuration is missing or unsafe."""
+
+
+class XOAuthCallbackError(XOAuthError):
+    """Raised when the loopback OAuth callback is invalid or denied."""
+
+
+class XOAuthTokenExchangeError(XOAuthError):
+    """Raised when an authorization code cannot be safely exchanged."""
+
+
+class XOAuthHandoffError(XOAuthError):
+    """Raised when tokens cannot be handed off outside the repository."""
