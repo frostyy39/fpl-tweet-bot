@@ -393,6 +393,24 @@ runs after success therefore make zero additional X requests. This module adds n
 checker endpoint, process loop, Cloud Run deployment, task creation implementation, or cloud
 provisioning.
 
+## Private Checker HTTP Surface
+
+The injectable Flask app can expose `POST /checker/run` alongside `POST /tasks/deadline` when a
+`DeadlineChecker` is supplied to `create_app`. The checker route accepts no authoritative request
+input: request bodies and query parameters are ignored, and the existing planner always obtains the
+event and deadline from fresh FPL data. The handler invokes the checker once and returns only a
+small JSON result label.
+
+Terminal outcomes return HTTP 200: no action today, task armed/already armed/reconciled, duplicate,
+overdue success, stale recovery, and known fail-closed outcomes. Explicitly retryable checker
+results and unknown exceptions return HTTP 503 so a later delivery may try again; the handler adds
+no retry loop. It never returns exception text, event data, credentials, tokens, or internal state.
+
+Production authentication remains outside Python: the future private Cloud Run service will rely
+on IAM, with only the future Scheduler caller granted invocation permission. The intended Scheduler
+cadence is once daily at `06:00 Europe/London`; no Scheduler resource, cron/process loop, IAM rule,
+deployment, or live dependency composition is included yet.
+
 ## Requirements and Installation
 
 - Python 3.11 or newer
