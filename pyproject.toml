@@ -13,6 +13,7 @@ dependencies = [
     "google-cloud-firestore>=2.29,<3",
     "google-cloud-secret-manager>=2.25,<3",
     "google-cloud-tasks>=2.24,<3",
+    "gunicorn>=26.2,<27",
     "tzdata>=2025.2; platform_system == 'Windows'",
 ]
 

@@ -556,6 +556,32 @@ acquisition or refresh, `/2/users/me`, exact numeric account-ID verification, an
 standalone test-post runner remains explicitly gated and continues accepting its deliberately
 supplied static `X_USER_ACCESS_TOKEN`; it does not silently opt into unattended refresh.
 
+## Container Runtime
+
+The production container serves the existing `create_production_app()` graph through Gunicorn; it
+does not use Flask's development server or add another application factory. Gunicorn binds to
+`0.0.0.0` on Cloud Run's `PORT`, with `8080` only as a local fallback. V1 uses one worker with two
+threads: this is deliberately modest for a small I/O-bound service, while Cloud Run can scale
+horizontally. Correctness never depends on this process layout; Firestore posting claims,
+deterministic Cloud Task identities, and the distributed OAuth refresh lease/CAS remain the safety
+boundaries across threads and instances.
+
+Build and run the image locally with runtime configuration supplied from outside the repository:
+
+```bash
+docker build -t fpl-tweet-bot:local .
+docker run --rm -p 8080:8080 -e PORT=8080 --env-file /absolute/path/outside/repo/runtime.env fpl-tweet-bot:local
+```
+
+The required variable names and meanings are listed in **Production Runtime Composition** above.
+Do not keep the referenced environment file in this repository. A future Cloud Run deployment will
+inject configuration and secrets and will use its service identity through Application Default
+Credentials; the image contains no service-account key, OAuth token, or environment-specific
+value. Importing `fpl_bot.wsgi` performs no composition or external operation. Gunicorn calls the
+factory once when starting the web application, and missing required configuration fails startup
+without printing secret values. No custom health or admin route is added; successful server startup
+is the runtime health signal.
+
 ## Requirements and Installation
 
 - Python 3.11 or newer
@@ -574,10 +600,10 @@ python -m pip install -e ".[dev]"
 
 FPL and X HTTP access use the Python standard library. The conditional `tzdata` dependency is the
 standard timezone database fallback on Windows. Firestore and Cloud Tasks production adapters use
-Google's official Python clients, while Flask supplies the injectable HTTP route adapter. Creating
-the Google clients will eventually require a Google Cloud project and Application Default
-Credentials, plus a Firestore database or Cloud Tasks queue respectively. No cloud resources or
-credentials are required or provisioned in this milestone.
+Google's official Python clients, Flask supplies the injectable HTTP route adapter, and Gunicorn is
+the Linux production WSGI server. Creating the Google clients will eventually require a Google
+Cloud project and Application Default Credentials, plus a Firestore database or Cloud Tasks queue
+respectively. No cloud resources or credentials are required or provisioned in this milestone.
 
 ## Development Commands
 
