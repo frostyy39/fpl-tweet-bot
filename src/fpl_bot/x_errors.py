@@ -93,3 +93,23 @@ class XTokenStoreError(XTokenError):
 
 class XTokenConcurrencyError(XTokenError):
     """Raised when a refresh race cannot be reconciled to valid authoritative state."""
+
+
+class XTokenSecretStorageError(XTokenStoreError):
+    """Raised when a token generation cannot be stored in Secret Manager."""
+
+
+class XTokenAuthorityPersistenceError(XTokenStoreError):
+    """Raised when a stored candidate is confirmed non-authoritative."""
+
+    def __init__(self, candidate_version_name: str) -> None:
+        super().__init__("OAuth token authority transition did not commit")
+        self.candidate_version_name = candidate_version_name
+
+
+class XTokenAuthorityUnconfirmedError(XTokenStoreError):
+    """Raised when a candidate generation's authority cannot be reconciled."""
+
+    def __init__(self, candidate_version_name: str) -> None:
+        super().__init__("OAuth token authority transition could not be confirmed")
+        self.candidate_version_name = candidate_version_name

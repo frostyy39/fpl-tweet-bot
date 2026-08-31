@@ -2,6 +2,7 @@
 
 import base64
 import json
+import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -29,6 +30,7 @@ from fpl_bot.x_oauth import (
 )
 
 DEFAULT_REFRESH_MARGIN = timedelta(minutes=5)
+DEFAULT_REFRESH_LEASE_DURATION = timedelta(minutes=1)
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -86,6 +88,22 @@ class VersionedXTokenState:
             raise XTokenStateError("OAuth token store returned invalid state")
 
 
+@dataclass(frozen=True, slots=True)
+class XTokenRefreshLease:
+    """Non-secret entitlement to refresh one exact authoritative generation."""
+
+    expected_revision: str
+    owner_id: str
+    expires_at_utc: datetime
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.expected_revision, str) or not self.expected_revision:
+            raise XTokenStateError("OAuth refresh lease revision must be non-empty")
+        if not isinstance(self.owner_id, str) or not self.owner_id:
+            raise XTokenStateError("OAuth refresh lease owner must be non-empty")
+        _require_utc(self.expires_at_utc, "OAuth refresh lease expiry")
+
+
 class XTokenStateStore(Protocol):
     """Mutable secure store requiring distributed compare-and-swap semantics."""
 
@@ -96,6 +114,27 @@ class XTokenStateStore(Protocol):
         expected_revision: str,
         replacement: XOAuthTokenState,
     ) -> bool: ...
+
+
+class XTokenRefreshCoordinator(Protocol):
+    """Distributed lease and authoritative transition around external refresh."""
+
+    def acquire_refresh_lease(
+        self,
+        expected_revision: str,
+        *,
+        owner_id: str,
+        now_utc: datetime,
+        expires_at_utc: datetime,
+    ) -> XTokenRefreshLease | None: ...
+
+    def replace_if_revision_with_lease(
+        self,
+        lease: XTokenRefreshLease,
+        replacement: XOAuthTokenState,
+    ) -> bool: ...
+
+    def release_refresh_lease(self, lease: XTokenRefreshLease) -> bool: ...
 
 
 class XOAuthRefreshBoundary(Protocol):
@@ -204,16 +243,26 @@ class RefreshingXAccessTokenProvider:
         refresh_client: XOAuthRefreshBoundary,
         credentials: OAuthClientCredentials,
         *,
+        refresh_coordinator: XTokenRefreshCoordinator | None = None,
         clock: Callable[[], datetime] | None = None,
         refresh_margin: timedelta = DEFAULT_REFRESH_MARGIN,
+        refresh_lease_duration: timedelta = DEFAULT_REFRESH_LEASE_DURATION,
+        lease_owner_factory: Callable[[], str] | None = None,
     ) -> None:
         if not isinstance(refresh_margin, timedelta) or refresh_margin < timedelta(0):
             raise ValueError("refresh_margin cannot be negative")
+        if not isinstance(refresh_lease_duration, timedelta) or refresh_lease_duration <= timedelta(
+            0
+        ):
+            raise ValueError("refresh_lease_duration must be positive")
         self._store = store
+        self._refresh_coordinator = refresh_coordinator
         self._refresh_client = refresh_client
         self._credentials = credentials
         self._clock = clock if clock is not None else _utc_now
         self._refresh_margin = refresh_margin
+        self._refresh_lease_duration = refresh_lease_duration
+        self._lease_owner_factory = lease_owner_factory or _new_lease_owner
 
     def get_valid_access_token(self) -> str:
         now_utc = self._clock()
@@ -222,6 +271,88 @@ class RefreshingXAccessTokenProvider:
         if original.state.is_valid_beyond(now_utc, self._refresh_margin):
             return original.state.access_token
 
+        if self._refresh_coordinator is not None:
+            return self._refresh_with_distributed_lease(original, now_utc)
+
+        return self._refresh_with_cas(original, now_utc)
+
+    def _refresh_with_distributed_lease(
+        self,
+        original: VersionedXTokenState,
+        now_utc: datetime,
+    ) -> str:
+        coordinator = self._refresh_coordinator
+        if coordinator is None:  # pragma: no cover - guarded by caller
+            raise XTokenStoreError("OAuth refresh coordinator is unavailable")
+        owner_id = self._lease_owner_factory()
+        if not isinstance(owner_id, str) or not owner_id:
+            raise XTokenStoreError("OAuth refresh lease owner generation failed")
+        try:
+            lease = coordinator.acquire_refresh_lease(
+                original.revision,
+                owner_id=owner_id,
+                now_utc=now_utc,
+                expires_at_utc=now_utc + self._refresh_lease_duration,
+            )
+        except XTokenStoreError:
+            raise
+        except Exception:
+            raise XTokenStoreError("OAuth refresh lease could not be acquired") from None
+        if lease is None:
+            return self._use_concurrent_winner(original, now_utc)
+
+        try:
+            reconfirmed = self._read_store()
+        except XTokenStoreError:
+            self._release_lease(coordinator, lease, suppress_errors=True)
+            raise
+        if reconfirmed.revision != original.revision:
+            self._release_lease(coordinator, lease)
+            if reconfirmed.state.is_valid_beyond(now_utc, self._refresh_margin):
+                return reconfirmed.state.access_token
+            raise XTokenConcurrencyError(
+                "Concurrent OAuth refresh did not yield usable authoritative token state"
+            )
+
+        try:
+            replacement = self._refresh_client.refresh(reconfirmed.state, self._credentials)
+        except XTokenRefreshError:
+            self._release_lease(coordinator, lease)
+            winner = self._read_store()
+            if winner.revision != original.revision and winner.state.is_valid_beyond(
+                now_utc, self._refresh_margin
+            ):
+                return winner.state.access_token
+            raise
+
+        try:
+            self._require_usable_replacement(replacement, now_utc)
+        except XTokenRefreshError:
+            self._release_lease(coordinator, lease)
+            raise
+        try:
+            replaced = coordinator.replace_if_revision_with_lease(lease, replacement)
+        except XTokenStoreError:
+            self._release_lease(coordinator, lease, suppress_errors=True)
+            raise
+        except Exception:
+            self._release_lease(coordinator, lease, suppress_errors=True)
+            raise XTokenStoreError(
+                "Refreshed OAuth token state could not be durably confirmed"
+            ) from None
+        if not isinstance(replaced, bool):
+            self._release_lease(coordinator, lease, suppress_errors=True)
+            raise XTokenStoreError("OAuth token store returned an invalid update result")
+        if replaced:
+            return replacement.access_token
+        self._release_lease(coordinator, lease, suppress_errors=True)
+        return self._use_concurrent_winner(original, now_utc)
+
+    def _refresh_with_cas(
+        self,
+        original: VersionedXTokenState,
+        now_utc: datetime,
+    ) -> str:
         try:
             replacement = self._refresh_client.refresh(original.state, self._credentials)
         except XTokenRefreshError:
@@ -232,10 +363,7 @@ class RefreshingXAccessTokenProvider:
                 return winner.state.access_token
             raise
 
-        if not replacement.is_valid_beyond(now_utc, self._refresh_margin):
-            raise XTokenRefreshError(
-                "X OAuth refresh returned an access token with insufficient usable lifetime"
-            )
+        self._require_usable_replacement(replacement, now_utc)
 
         try:
             replaced = self._store.replace_if_revision(original.revision, replacement)
@@ -247,7 +375,13 @@ class RefreshingXAccessTokenProvider:
             raise XTokenStoreError("OAuth token store returned an invalid update result")
         if replaced:
             return replacement.access_token
+        return self._use_concurrent_winner(original, now_utc)
 
+    def _use_concurrent_winner(
+        self,
+        original: VersionedXTokenState,
+        now_utc: datetime,
+    ) -> str:
         winner = self._read_store()
         if winner.revision != original.revision and winner.state.is_valid_beyond(
             now_utc, self._refresh_margin
@@ -256,6 +390,32 @@ class RefreshingXAccessTokenProvider:
         raise XTokenConcurrencyError(
             "Concurrent OAuth refresh did not yield usable authoritative token state"
         )
+
+    def _require_usable_replacement(
+        self,
+        replacement: XOAuthTokenState,
+        now_utc: datetime,
+    ) -> None:
+        if not replacement.is_valid_beyond(now_utc, self._refresh_margin):
+            raise XTokenRefreshError(
+                "X OAuth refresh returned an access token with insufficient usable lifetime"
+            )
+
+    @staticmethod
+    def _release_lease(
+        coordinator: XTokenRefreshCoordinator,
+        lease: XTokenRefreshLease,
+        *,
+        suppress_errors: bool = False,
+    ) -> None:
+        try:
+            released = coordinator.release_refresh_lease(lease)
+            if not isinstance(released, bool):
+                raise XTokenStoreError("OAuth refresh lease release returned an invalid result")
+        except Exception:
+            if suppress_errors:
+                return
+            raise XTokenStoreError("OAuth refresh lease could not be safely released") from None
 
     def _read_store(self) -> VersionedXTokenState:
         try:
@@ -362,3 +522,7 @@ def _validate_token_endpoint(url: str) -> None:
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def _new_lease_owner() -> str:
+    return secrets.token_urlsafe(24)

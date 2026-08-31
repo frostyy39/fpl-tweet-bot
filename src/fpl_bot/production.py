@@ -17,6 +17,11 @@ from fpl_bot.cloud_tasks import (
     GoogleCloudTasksAdapter,
     GooglePreflightCloudTasksAdapter,
 )
+from fpl_bot.cloud_token_store import (
+    CloudXTokenStateStoreConfig,
+    GoogleCloudXTokenStateStore,
+    SecretManagerClient,
+)
 from fpl_bot.deadline_checker import DeadlineChecker
 from fpl_bot.deadline_http_app import (
     DEADLINE_TASK_ROUTE,
@@ -34,6 +39,7 @@ from fpl_bot.service import FplDataSource
 from fpl_bot.task_arming import DeadlineTaskArmer
 from fpl_bot.x_api import XApiClient, XHttpTransport
 from fpl_bot.x_config import XPostingConfig
+from fpl_bot.x_errors import XTokenStateError
 from fpl_bot.x_oauth import (
     X_OAUTH_CLIENT_ID_VARIABLE,
     X_OAUTH_CLIENT_SECRET_VARIABLE,
@@ -52,6 +58,7 @@ CLOUD_TASKS_QUEUE_ID_VARIABLE = "CLOUD_TASKS_QUEUE_ID"
 CLOUD_RUN_BASE_URL_VARIABLE = "CLOUD_RUN_BASE_URL"
 CLOUD_TASKS_CALLER_SERVICE_ACCOUNT_EMAIL_VARIABLE = "CLOUD_TASKS_CALLER_SERVICE_ACCOUNT_EMAIL"
 CLOUD_TASKS_OIDC_AUDIENCE_VARIABLE = "CLOUD_TASKS_OIDC_AUDIENCE"
+X_TOKEN_SECRET_ID_VARIABLE = "X_TOKEN_SECRET_ID"
 
 DEFAULT_FIRESTORE_DATABASE_ID = "(default)"
 FIRESTORE_DATABASE_ID_PATTERN = re.compile(r"(?:\(default\)|[a-z][a-z0-9-]{2,61}[a-z0-9])\Z")
@@ -69,6 +76,7 @@ class ProductionRuntimeConfig:
     firestore_database_id: str
     deadline_tasks: CloudTasksConfig
     preflight_tasks: CloudTasksConfig
+    x_token_secret_id: str
     x_posting: XPostingConfig = field(repr=False)
     x_oauth_credentials: OAuthClientCredentials = field(repr=False)
 
@@ -119,7 +127,18 @@ class ProductionRuntimeConfig:
             oidc_audience=oidc_audience or base_url,
         )
         x_posting = XPostingConfig.from_environment(source)
-        x_posting.require_posting_identity_guard()
+        expected_user_id = x_posting.require_posting_identity_guard()
+        x_token_secret_id = _required_value(source, X_TOKEN_SECRET_ID_VARIABLE)
+        try:
+            CloudXTokenStateStoreConfig(
+                project_id=project_id,
+                secret_id=x_token_secret_id,
+                expected_user_id=expected_user_id,
+            )
+        except XTokenStateError:
+            raise ProductionConfigurationError(
+                f"{X_TOKEN_SECRET_ID_VARIABLE} is not a valid Secret Manager secret ID"
+            ) from None
         x_oauth_credentials = OAuthClientCredentials(
             client_id=_required_value(source, X_OAUTH_CLIENT_ID_VARIABLE),
             client_secret=_required_value(source, X_OAUTH_CLIENT_SECRET_VARIABLE),
@@ -130,6 +149,7 @@ class ProductionRuntimeConfig:
             firestore_database_id=database_id,
             deadline_tasks=deadline_tasks,
             preflight_tasks=preflight_tasks,
+            x_token_secret_id=x_token_secret_id,
             x_posting=x_posting,
             x_oauth_credentials=x_oauth_credentials,
         )
@@ -144,6 +164,7 @@ def create_production_app(
     fpl_source: FplDataSource | None = None,
     firestore_client: FirestoreClient | None = None,
     cloud_tasks_client: Any | None = None,
+    secret_manager_client: SecretManagerClient | None = None,
     x_transport: XHttpTransport | None = None,
     x_token_store: XTokenStateStore | None = None,
     x_refresh_transport: XHttpTransport | None = None,
@@ -152,22 +173,51 @@ def create_production_app(
     """Validate configuration and compose the existing V1 graph into one Flask app."""
 
     config = ProductionRuntimeConfig.from_environment(environ)
-    if x_token_store is None:
-        raise ProductionConfigurationError(
-            "A mutable secure X token-state store with distributed compare-and-swap is required"
-        )
     source = fpl_source if fpl_source is not None else FplApiClient()
-    state_store = FirestorePostingStateStore(
+    firestore = (
         firestore_client if firestore_client is not None else _default_firestore_client(config)
     )
+    state_store = FirestorePostingStateStore(firestore)
     task_client = (
         cloud_tasks_client if cloud_tasks_client is not None else _default_cloud_tasks_client()
     )
 
+    token_store = x_token_store
+    if token_store is None:
+        expected_user_id = config.x_posting.expected_user_id
+        if expected_user_id is None:  # pragma: no cover - validated above
+            raise ProductionConfigurationError("X expected user ID is unavailable")
+        token_store = GoogleCloudXTokenStateStore(
+            CloudXTokenStateStoreConfig(
+                project_id=config.gcp_project_id,
+                secret_id=config.x_token_secret_id,
+                expected_user_id=expected_user_id,
+            ),
+            firestore_client=firestore,
+            secret_manager_client=(
+                secret_manager_client
+                if secret_manager_client is not None
+                else _default_secret_manager_client()
+            ),
+            clock=clock,
+        )
+    refresh_coordinator = (
+        token_store
+        if all(
+            callable(getattr(token_store, name, None))
+            for name in (
+                "acquire_refresh_lease",
+                "replace_if_revision_with_lease",
+                "release_refresh_lease",
+            )
+        )
+        else None
+    )
     token_provider = RefreshingXAccessTokenProvider(
-        x_token_store,
+        token_store,
         XOAuthRefreshClient(transport=x_refresh_transport, now=clock),
         config.x_oauth_credentials,
+        refresh_coordinator=refresh_coordinator,
         clock=clock,
     )
     x_client = XApiClient(
@@ -233,6 +283,12 @@ def _default_cloud_tasks_client() -> Any:
     from google.cloud import tasks_v2
 
     return tasks_v2.CloudTasksClient()
+
+
+def _default_secret_manager_client() -> SecretManagerClient:
+    from google.cloud import secretmanager
+
+    return secretmanager.SecretManagerServiceClient()
 
 
 def _required_value(source: Mapping[str, str], name: str) -> str:

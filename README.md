@@ -466,20 +466,18 @@ values:
 | `X_ENVIRONMENT` | Existing guarded X environment; currently only `test` is accepted. | No |
 | `X_POSTING_ENABLED` | Must be explicitly `true`; no token alone enables writing. | No |
 | `X_EXPECTED_USER_ID` | Immutable numeric ID verified through `/2/users/me` before every write. | No |
+| `X_TOKEN_SECRET_ID` | Existing Secret Manager secret that holds versioned OAuth token-state payloads. | No |
 | `X_OAUTH_CLIENT_ID` | Confidential OAuth client ID used for token refresh. | **Yes** |
 | `X_OAUTH_CLIENT_SECRET` | Confidential OAuth client secret used for token-endpoint authentication. | **Yes** |
 
-Firestore and Cloud Tasks use Application Default Credentials and the future Cloud Run service
-identity. No service-account key file is loaded by the application. The static OAuth client secret
-may eventually be injected from Secret Manager as an environment variable. Mutable access and
-refresh tokens must instead come from the token-state store described below. This repository does
-not fetch, provision, log, or persist cloud secrets and does not provision Firestore, queues, IAM,
-Scheduler, or Cloud Run.
+Firestore, Cloud Tasks, and Secret Manager use Application Default Credentials and the future Cloud
+Run service identity. No service-account key file is loaded by the application. The static OAuth
+client secret may be injected from Secret Manager as an environment variable. Mutable access and
+refresh tokens instead use the distributed token-state store described below. The application does
+not create the secret, initialize Firestore, provision IAM, or deploy cloud resources.
 
-Production-account deployment remains blocked in two explicit ways. The write guard still accepts
-only `X_ENVIRONMENT=test`, and cloud deployment still needs a secure distributed implementation of
-the token-state store. The production factory accepts that boundary explicitly and refuses to build
-the posting graph without it; this milestone adds no cloud token-store adapter or secret resource.
+Production-account deployment remains deliberately blocked by the write guard, which still accepts
+only `X_ENVIRONMENT=test`. Cloud resources and initial token authority also remain unprovisioned.
 
 This milestone adds composition only: it does not change the 06:00 planning decision, five-minute
 preflight, exact-deadline task identity, live revalidation, event-level idempotency, X identity
@@ -504,13 +502,53 @@ Validated replacement state must be durably stored before its access token reach
 
 Token persistence is behind a versioned compare-and-swap interface. A concurrent loser cannot
 overwrite a newer token generation: it re-reads and may use the already-valid authoritative state,
-without an internal retry loop. The included in-memory store is deterministic test support, not a
-production lock or cloud persistence mechanism. Cloud deployment still requires a secure, mutable,
-distributed store implementing these semantics. Ordinary Secret Manager environment injection is
-insufficient for rotating token state because an environment value is fixed for the lifetime of a
-Cloud Run instance or revision; Google documents that
+without an internal retry loop. The included in-memory store remains deterministic test support
+only. Ordinary Secret Manager environment injection is insufficient for rotating token state
+because an environment value is fixed for the lifetime of a Cloud Run instance or revision; Google
+documents that
 [secret environment variables are resolved at instance startup](https://cloud.google.com/run/docs/configuring/services/secrets).
 Do not store refresh tokens in Firestore.
+
+### Distributed cloud token state
+
+`GoogleCloudXTokenStateStore` stores each complete sensitive OAuth generation as a version of the
+configured `X_TOKEN_SECRET_ID`. Firestore collection `x_oauth_token_authority` contains one
+non-secret document named `x-user-{X_EXPECTED_USER_ID}`. That document records the schema,
+monotonic revision, exact authoritative Secret Manager version resource name, previous version,
+UTC update time, and optional refresh lease owner/expiry. It never contains tokens or OAuth client
+credentials.
+
+Readers access only the explicit numeric Secret Manager version selected by Firestore. They never
+use `latest` or a version alias: Google documents that an added version is strongly consistent when
+read by its [explicit version number](https://cloud.google.com/secret-manager/docs/reference/consistency),
+but not through `latest` or aliases.
+
+When refresh is required, a Firestore transaction grants a one-minute lease for the current
+revision. The OAuth request then occurs outside the transaction. The validated response is written
+immediately as a new Secret Manager version, after which a second Firestore transaction checks the
+revision and lease owner, advances authority, and clears the lease. Only a confirmed authoritative
+generation may supply an access token to `/2/users/me` and the posting client. Transaction callback
+retries therefore repeat metadata operations only; they cannot repeat OAuth or X requests.
+
+If Secret Manager storage fails, Firestore authority is unchanged. If Secret Manager succeeds but
+Firestore definitely rejects the transition, the candidate remains non-authoritative. If the
+Firestore outcome is uncertain, the store re-reads authority and accepts the candidate only when
+that exact version and revision are confirmed; otherwise it fails closed and retains the orphan for
+manual reconciliation. A crashed refresher's lease expires, allowing a later invocation to recover.
+After a successful rotation the current and immediately previous versions remain enabled; an older
+superseded version is disabled best-effort. Cleanup failure cannot affect current authority, and no
+potentially authoritative candidate is destroyed.
+
+The initial deployment bootstrap remains manual: authorize the approved test account with the
+existing local DPAPI helper, add the complete serialized token state securely as the first version
+of the pre-created secret without printing it, then initialize the Firestore authority document to
+that explicit version and revision. No bootstrap transfer or provisioning command is included.
+
+The eventual Cloud Run identity needs narrowly scoped Firestore document read/transaction writes,
+plus `secretmanager.versions.access` and `secretmanager.versions.add` on the configured secret.
+Best-effort old-version disabling additionally needs `secretmanager.versions.disable`; use a
+secret-scoped custom role or the narrowest suitable predefined roles, not project-wide Secret
+Manager Admin.
 
 The posting order remains: durable event claim, persisted `posting_in_progress`, valid-token
 acquisition or refresh, `/2/users/me`, exact numeric account-ID verification, and at most one

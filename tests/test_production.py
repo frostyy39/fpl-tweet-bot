@@ -28,6 +28,7 @@ from fpl_bot.production import (
     CLOUD_TASKS_QUEUE_ID_VARIABLE,
     FIRESTORE_DATABASE_ID_VARIABLE,
     GCP_PROJECT_ID_VARIABLE,
+    X_TOKEN_SECRET_ID_VARIABLE,
     ProductionConfigurationError,
     ProductionRuntimeConfig,
     create_production_app,
@@ -52,6 +53,7 @@ def valid_environment() -> dict[str, str]:
         "X_EXPECTED_USER_ID": TEST_USER_ID,
         X_OAUTH_CLIENT_ID_VARIABLE: "unit-test-client-id-placeholder",
         X_OAUTH_CLIENT_SECRET_VARIABLE: "unit-test-client-secret-placeholder",
+        X_TOKEN_SECRET_ID_VARIABLE: "unit-test-x-token-state",
         GCP_PROJECT_ID_VARIABLE: "fpl-bot-test",
         FIRESTORE_DATABASE_ID_VARIABLE: "(default)",
         CLOUD_TASKS_LOCATION_ID_VARIABLE: "europe-west2",
@@ -245,9 +247,34 @@ def test_valid_configuration_builds_all_three_routes_without_external_activity()
     assert x_transport.requests == []
 
 
-def test_production_factory_requires_mutable_token_store_without_constructing_clients() -> None:
-    with pytest.raises(ProductionConfigurationError, match="token-state store"):
-        create_production_app(valid_environment())
+def test_production_factory_constructs_cloud_token_store_without_reading_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    constructed: list[object] = []
+
+    class FakeCloudStore:
+        def __init__(self, config: object, **kwargs: object) -> None:
+            constructed.append((config, kwargs))
+
+        def read(self):
+            raise AssertionError("Application construction must not read the token secret")
+
+        def replace_if_revision(self, expected_revision, replacement):
+            raise AssertionError("Application construction must not rotate token state")
+
+    monkeypatch.setattr(production, "GoogleCloudXTokenStateStore", FakeCloudStore)
+    app = create_production_app(
+        valid_environment(),
+        fpl_source=StaticFplSource(bootstrap()),
+        firestore_client=MagicMock(),
+        cloud_tasks_client=RecordingCloudTasksClient(),
+        secret_manager_client=MagicMock(),
+        x_transport=ForbiddenXTransport(),
+        clock=lambda: CHECKER_TIME_UTC,
+    )
+
+    assert app is not None
+    assert len(constructed) == 1
 
 
 @pytest.mark.parametrize(
@@ -258,6 +285,7 @@ def test_production_factory_requires_mutable_token_store_without_constructing_cl
         CLOUD_TASKS_QUEUE_ID_VARIABLE,
         CLOUD_RUN_BASE_URL_VARIABLE,
         CLOUD_TASKS_CALLER_SERVICE_ACCOUNT_EMAIL_VARIABLE,
+        X_TOKEN_SECRET_ID_VARIABLE,
     ],
 )
 def test_missing_required_infrastructure_configuration_fails_before_app_creation(
@@ -317,6 +345,14 @@ def test_invalid_firestore_database_id_fails_closed() -> None:
     environ[FIRESTORE_DATABASE_ID_VARIABLE] = "Invalid Database"
 
     with pytest.raises(ProductionConfigurationError, match=FIRESTORE_DATABASE_ID_VARIABLE):
+        ProductionRuntimeConfig.from_environment(environ)
+
+
+def test_invalid_x_token_secret_id_fails_closed() -> None:
+    environ = valid_environment()
+    environ[X_TOKEN_SECRET_ID_VARIABLE] = "invalid/secret"
+
+    with pytest.raises(ProductionConfigurationError, match=X_TOKEN_SECRET_ID_VARIABLE):
         ProductionRuntimeConfig.from_environment(environ)
 
 
@@ -488,7 +524,7 @@ def test_deadline_route_refreshes_expiring_token_before_identity_and_post(
 def test_importing_production_module_constructs_no_clients_or_services(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from google.cloud import firestore_v1, tasks_v2
+    from google.cloud import firestore_v1, secretmanager, tasks_v2
 
     def forbidden(*args: Any, **kwargs: Any) -> None:
         raise AssertionError("Import must not construct external clients or services")
@@ -498,6 +534,7 @@ def test_importing_production_module_constructs_no_clients_or_services(
     monkeypatch.setattr(production.XOAuthRefreshClient, "__init__", forbidden)
     monkeypatch.setattr(firestore_v1, "Client", forbidden)
     monkeypatch.setattr(tasks_v2, "CloudTasksClient", forbidden)
+    monkeypatch.setattr(secretmanager, "SecretManagerServiceClient", forbidden)
     monkeypatch.setattr(ProductionRuntimeConfig, "from_environment", forbidden)
 
     importlib.reload(production)
