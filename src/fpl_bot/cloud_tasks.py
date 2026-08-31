@@ -31,6 +31,7 @@ PREFLIGHT_LEAD_TIME = timedelta(minutes=5)
 TASK_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,500}\Z")
 RESOURCE_ID_PATTERN = re.compile(r"[A-Za-z0-9-]+\Z")
 PROJECT_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]*\Z")
+SERVICE_ACCOUNT_ID_PATTERN = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]\Z")
 
 
 class CloudTaskError(FplBotError):
@@ -114,10 +115,15 @@ class CloudTasksConfig:
         _require_pattern(self.queue_id, RESOURCE_ID_PATTERN, "Cloud Tasks queue ID", 100)
         _require_https_url(self.execution_url, "Execution URL")
         expected_suffix = f"@{self.project_id}.iam.gserviceaccount.com"
+        service_account_id = (
+            self.service_account_email.removesuffix(expected_suffix)
+            if isinstance(self.service_account_email, str)
+            else ""
+        )
         if (
             not isinstance(self.service_account_email, str)
             or not self.service_account_email.endswith(expected_suffix)
-            or self.service_account_email == expected_suffix
+            or SERVICE_ACCOUNT_ID_PATTERN.fullmatch(service_account_id) is None
         ):
             raise CloudTaskValidationError(
                 "Task caller service account must belong to the configured GCP project"

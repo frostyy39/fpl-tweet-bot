@@ -366,6 +366,7 @@ def test_malformed_success_response_is_ambiguous() -> None:
         {"execution_url": "http://not-secure.example/tasks"},
         {"execution_url": "https://user:password@example.test/tasks"},
         {"service_account_email": "caller@another-project.iam.gserviceaccount.com"},
+        {"service_account_email": "bad account@fpl-bot-test.iam.gserviceaccount.com"},
         {"oidc_audience": "not-a-url"},
     ],
 )

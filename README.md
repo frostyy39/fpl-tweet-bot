@@ -439,6 +439,54 @@ another London day is marked stale for the normal daily checker. Claimed posting
 immutable. Cloud Run/IAM remains the authentication boundary; no Scheduler, deployment, IAM,
 queue, or Firestore provisioning is included.
 
+## Production Runtime Composition
+
+`fpl_bot.production.create_production_app()` is the explicit composition path for the existing V1
+services. Importing the module reads no configuration, creates no SDK client, starts no server, and
+makes no external request. Calling the factory validates configuration, constructs the existing FPL,
+Firestore, Cloud Tasks, X, planning, preflight, revalidation, and posting components, and returns one
+Flask app with these private IAM-protected routes:
+
+- `POST /checker/run` — intended for Cloud Scheduler once daily at `06:00 Europe/London`;
+- `POST /tasks/preflight` — deterministic warmup five minutes before the official deadline;
+- `POST /tasks/deadline` — live revalidation and guarded execution at the official FPL deadline.
+
+Required runtime environment variables contain configuration names only; do not commit their
+values:
+
+| Name | Purpose | Secret |
+| --- | --- | --- |
+| `GCP_PROJECT_ID` | Google Cloud project used by Firestore and Cloud Tasks. | No |
+| `FIRESTORE_DATABASE_ID` | Firestore database ID; optional, defaults to `(default)`. | No |
+| `CLOUD_TASKS_LOCATION_ID` | Cloud Tasks region, such as the chosen UK-compatible region. | No |
+| `CLOUD_TASKS_QUEUE_ID` | Existing queue that will hold deadline and preflight tasks. | No |
+| `CLOUD_RUN_BASE_URL` | HTTPS origin of the future private Cloud Run service. | No |
+| `CLOUD_TASKS_CALLER_SERVICE_ACCOUNT_EMAIL` | Service identity attached to task OIDC tokens. | No |
+| `CLOUD_TASKS_OIDC_AUDIENCE` | Optional OIDC audience; defaults to the Cloud Run origin. | No |
+| `X_ENVIRONMENT` | Existing guarded X environment; currently only `test` is accepted. | No |
+| `X_POSTING_ENABLED` | Must be explicitly `true`; no token alone enables writing. | No |
+| `X_EXPECTED_USER_ID` | Immutable numeric ID verified through `/2/users/me` before every write. | No |
+| `X_USER_ACCESS_TOKEN` | OAuth 2.0 user-context access token injected at runtime. | **Yes** |
+
+Firestore and Cloud Tasks use Application Default Credentials and the future Cloud Run service
+identity. No service-account key file is loaded by the application. The deployment layer should map
+the X access token from Secret Manager into the process environment; this repository does not fetch,
+provision, log, or persist that secret and does not provision Firestore, queues, IAM, Scheduler, or
+Cloud Run.
+
+Two X lifecycle items block unattended production-account deployment. First, the existing write
+guard intentionally supports only `X_ENVIRONMENT=test`; production-account enablement remains a
+separate reviewed change. Second, OAuth authorization returns an expiring access token and a refresh
+token because `offline.access` is requested. The encrypted local handoff retains both plus the
+provider's `expires_in` value, but the runtime client accepts only the access token and the codebase
+has no refresh-token grant or managed rotation path. Before a season-long rehearsal, implement and
+review confidential-client refresh, safe refresh-token storage/rotation, and refreshed access-token
+injection. Do not assume the current test access token remains valid indefinitely.
+
+This milestone adds composition only: it does not change the 06:00 planning decision, five-minute
+preflight, exact-deadline task identity, live revalidation, event-level idempotency, X identity
+guard, or retry behaviour.
+
 ## Requirements and Installation
 
 - Python 3.11 or newer
