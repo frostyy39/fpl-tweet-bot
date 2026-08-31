@@ -14,6 +14,7 @@ from fpl_bot.x_errors import (
     XAmbiguousWriteError,
     XApiResponseError,
     XAuthenticationError,
+    XConfigurationError,
     XIdentityMismatchError,
     XPermissionError,
     XRateLimitError,
@@ -59,6 +60,12 @@ class XPostCreator(Protocol):
     """Injectable boundary for guarded text-Post creation."""
 
     def create_text_post(self, text: str) -> CreatedXPost: ...
+
+
+class XAccessTokenProvider(Protocol):
+    """Supply a validated current user-context access token."""
+
+    def get_valid_access_token(self) -> str: ...
 
 
 class XHttpTransport(Protocol):
@@ -115,15 +122,20 @@ class XApiClient:
         *,
         timeout_seconds: float = 10.0,
         transport: XHttpTransport | None = None,
+        token_provider: XAccessTokenProvider | None = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be greater than zero")
         self._config = config
         self._timeout_seconds = timeout_seconds
         self._transport = transport if transport is not None else UrllibXHttpTransport()
+        self._token_provider = token_provider
 
     def get_authenticated_user(self) -> AuthenticatedXUser:
-        token = self._config.require_user_access_token()
+        token = self._get_valid_access_token()
+        return self._get_authenticated_user(token)
+
+    def _get_authenticated_user(self, token: str) -> AuthenticatedXUser:
         response = self._send("GET", "2/users/me", token=token)
         self._raise_for_read_status(response)
         payload = _decode_json(response.body)
@@ -132,8 +144,9 @@ class XApiClient:
     def create_text_post(self, text: str) -> CreatedXPost:
         """Create exactly the supplied text after all configuration and identity guards pass."""
         _validate_post_text(text)
-        token, expected_user_id = self._config.require_posting_guards()
-        authenticated_user = self.get_authenticated_user()
+        expected_user_id = self._config.require_posting_identity_guard()
+        token = self._get_valid_access_token()
+        authenticated_user = self._get_authenticated_user(token)
         if authenticated_user.user_id != expected_user_id:
             raise XIdentityMismatchError(
                 "Authenticated X user ID does not match the configured expected user ID; "
@@ -188,6 +201,21 @@ class XApiClient:
             body=body,
         )
         return self._transport.send(request, self._timeout_seconds)
+
+    def _get_valid_access_token(self) -> str:
+        token = (
+            self._token_provider.get_valid_access_token()
+            if self._token_provider is not None
+            else self._config.require_user_access_token()
+        )
+        if (
+            not isinstance(token, str)
+            or not token
+            or token != token.strip()
+            or not token.isprintable()
+        ):
+            raise XConfigurationError("X access-token provider returned no valid credential")
+        return token
 
     @staticmethod
     def _raise_for_read_status(response: XHttpResponse) -> None:

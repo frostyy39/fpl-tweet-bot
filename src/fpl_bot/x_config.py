@@ -46,6 +46,12 @@ class XPostingConfig:
         return self.user_access_token
 
     def require_posting_guards(self) -> tuple[str, str]:
+        expected_user_id = self.require_posting_identity_guard()
+        token = self.require_user_access_token()
+        return token, expected_user_id
+
+    def require_posting_identity_guard(self) -> str:
+        """Validate non-credential write guards for provider-backed clients."""
         if not self.posting_enabled:
             raise XConfigurationError(
                 f"X posting is disabled; set {X_POSTING_ENABLED_VARIABLE}=true explicitly"
@@ -55,7 +61,6 @@ class XPostingConfig:
                 f"{X_ENVIRONMENT_VARIABLE} must be {TEST_ENVIRONMENT!r}; "
                 "Milestone 2A has no production mode"
             )
-        token = self.require_user_access_token()
         if self.expected_user_id is None:
             raise XConfigurationError(
                 f"{X_EXPECTED_USER_ID_VARIABLE} is required before X posting can be enabled"
@@ -64,7 +69,7 @@ class XPostingConfig:
             raise XConfigurationError(
                 f"{X_EXPECTED_USER_ID_VARIABLE} must be a positive numeric X user ID"
             )
-        return token, self.expected_user_id
+        return self.expected_user_id
 
 
 def _parse_posting_enabled(value: str | None) -> bool:

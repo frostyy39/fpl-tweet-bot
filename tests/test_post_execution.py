@@ -37,6 +37,7 @@ from fpl_bot.x_errors import (
     XConfigurationError,
     XIdentityMismatchError,
     XPermissionError,
+    XTokenRefreshError,
 )
 
 EVENT_ID = 3
@@ -137,6 +138,11 @@ class RecordingXCreator:
         if self.error is not None:
             raise self.error
         return CreatedXPost(post_id=X_POST_ID, text=text)
+
+
+class FailingTokenProvider:
+    def get_valid_access_token(self) -> str:
+        raise XTokenRefreshError("OAuth refresh failed without an X write")
 
 
 class RecordingTransport:
@@ -387,6 +393,31 @@ def test_configuration_failure_records_failed_with_zero_x_requests() -> None:
     )
 
     with pytest.raises(XConfigurationError):
+        coordinator(store, x_client).execute(event_report())
+
+    assert events == ["claim", "mark_in_progress", "record_failure"]
+    assert transport.requests == []
+    persisted = store.get_event(EVENT_ID)
+    assert persisted is not None
+    assert persisted.status is PostingStatus.FAILED
+    assert_event_is_closed(store, PostingStatus.FAILED)
+
+
+def test_token_refresh_failure_after_in_progress_is_definite_failed_with_zero_x_requests() -> None:
+    events: list[str] = []
+    store = RecordingStateStore(events)
+    transport = RecordingTransport(events, [])
+    x_client = XApiClient(
+        XPostingConfig(
+            environment="test",
+            posting_enabled=True,
+            expected_user_id=EXPECTED_USER_ID,
+        ),
+        transport=transport,
+        token_provider=FailingTokenProvider(),
+    )
+
+    with pytest.raises(XTokenRefreshError):
         coordinator(store, x_client).execute(event_report())
 
     assert events == ["claim", "mark_in_progress", "record_failure"]

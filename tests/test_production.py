@@ -34,6 +34,8 @@ from fpl_bot.production import (
 )
 from fpl_bot.x_api import XApiClient, XHttpRequest, XHttpResponse
 from fpl_bot.x_errors import XConfigurationError
+from fpl_bot.x_oauth import X_OAUTH_CLIENT_ID_VARIABLE, X_OAUTH_CLIENT_SECRET_VARIABLE
+from fpl_bot.x_token_refresh import InMemoryXTokenStateStore, XOAuthTokenState
 
 EVENT_ID = 3
 DEADLINE_UTC = datetime(2026, 8, 29, 10, 30, tzinfo=UTC)
@@ -48,7 +50,8 @@ def valid_environment() -> dict[str, str]:
         "X_ENVIRONMENT": "test",
         "X_POSTING_ENABLED": "true",
         "X_EXPECTED_USER_ID": TEST_USER_ID,
-        "X_USER_ACCESS_TOKEN": "unit-test-token-placeholder",
+        X_OAUTH_CLIENT_ID_VARIABLE: "unit-test-client-id-placeholder",
+        X_OAUTH_CLIENT_SECRET_VARIABLE: "unit-test-client-secret-placeholder",
         GCP_PROJECT_ID_VARIABLE: "fpl-bot-test",
         FIRESTORE_DATABASE_ID_VARIABLE: "(default)",
         CLOUD_TASKS_LOCATION_ID_VARIABLE: "europe-west2",
@@ -144,6 +147,27 @@ class SuccessfulXTransport:
         )
 
 
+class SuccessfulRefreshTransport:
+    def __init__(self) -> None:
+        self.requests: list[XHttpRequest] = []
+
+    def send(self, request: XHttpRequest, timeout_seconds: float) -> XHttpResponse:
+        assert timeout_seconds == 10.0
+        self.requests.append(request)
+        return XHttpResponse(
+            200,
+            json.dumps(
+                {
+                    "access_token": "unit-test-refreshed-access-placeholder",
+                    "refresh_token": "unit-test-refreshed-refresh-placeholder",
+                    "token_type": "bearer",
+                    "expires_in": 7200,
+                    "scope": "tweet.read users.read tweet.write offline.access",
+                }
+            ).encode(),
+        )
+
+
 class FakeRevalidator:
     def execute(self, instruction: ScheduledDeadlineInstruction):
         raise AssertionError("The injectable test app must not require production configuration")
@@ -151,6 +175,19 @@ class FakeRevalidator:
 
 def instruction(deadline: datetime = DEADLINE_UTC) -> ScheduledDeadlineInstruction:
     return ScheduledDeadlineInstruction(EVENT_ID, deadline)
+
+
+def valid_token_store(
+    *,
+    expires_at: datetime = DEADLINE_UTC + timedelta(days=1),
+) -> InMemoryXTokenStateStore:
+    return InMemoryXTokenStateStore(
+        XOAuthTokenState(
+            access_token="unit-test-token-placeholder",
+            refresh_token="unit-test-refresh-placeholder",
+            expires_at_utc=expires_at,
+        )
+    )
 
 
 def _app_with_in_memory_state(
@@ -174,6 +211,7 @@ def _app_with_in_memory_state(
         firestore_client=MagicMock(),
         cloud_tasks_client=client,
         x_transport=x_transport,
+        x_token_store=valid_token_store(),
         clock=lambda: now,
     )
     return app, store, client
@@ -191,6 +229,7 @@ def test_valid_configuration_builds_all_three_routes_without_external_activity()
         firestore_client=firestore_client,
         cloud_tasks_client=task_client,
         x_transport=x_transport,
+        x_token_store=valid_token_store(),
         clock=lambda: CHECKER_TIME_UTC,
     )
 
@@ -204,6 +243,11 @@ def test_valid_configuration_builds_all_three_routes_without_external_activity()
     firestore_client.transaction.assert_not_called()
     assert task_client.create_requests == []
     assert x_transport.requests == []
+
+
+def test_production_factory_requires_mutable_token_store_without_constructing_clients() -> None:
+    with pytest.raises(ProductionConfigurationError, match="token-state store"):
+        create_production_app(valid_environment())
 
 
 @pytest.mark.parametrize(
@@ -284,32 +328,33 @@ def test_malformed_expected_x_user_id_fails_closed() -> None:
         ProductionRuntimeConfig.from_environment(environ)
 
 
-def test_missing_x_access_token_fails_without_secret_output() -> None:
+def test_missing_x_oauth_client_secret_fails_without_secret_output() -> None:
     environ = valid_environment()
-    environ.pop("X_USER_ACCESS_TOKEN")
+    environ.pop(X_OAUTH_CLIENT_SECRET_VARIABLE)
 
-    with pytest.raises(XConfigurationError) as error:
+    with pytest.raises(ProductionConfigurationError) as error:
         ProductionRuntimeConfig.from_environment(environ)
 
-    assert str(error.value) == "X_USER_ACCESS_TOKEN is required for X user-context requests"
-    assert "unit-test-token-placeholder" not in str(error.value)
+    assert X_OAUTH_CLIENT_SECRET_VARIABLE in str(error.value)
+    assert "unit-test-client-id-placeholder" not in str(error.value)
 
 
-def test_runtime_config_repr_redacts_x_access_token() -> None:
+def test_runtime_config_repr_redacts_x_oauth_client_credentials() -> None:
     config = ProductionRuntimeConfig.from_environment(valid_environment())
 
-    assert "unit-test-token-placeholder" not in repr(config)
+    assert "unit-test-client-id-placeholder" not in repr(config)
+    assert "unit-test-client-secret-placeholder" not in repr(config)
 
 
-def test_configuration_error_does_not_expose_access_token() -> None:
+def test_configuration_error_does_not_expose_oauth_client_secret() -> None:
     environ = valid_environment()
     environ[CLOUD_RUN_BASE_URL_VARIABLE] = "not-an-https-origin"
 
     with pytest.raises(CloudTaskValidationError) as error:
         ProductionRuntimeConfig.from_environment(environ)
 
-    assert "unit-test-token-placeholder" not in str(error.value)
-    assert "unit-test-token-placeholder" not in repr(error.value)
+    assert "unit-test-client-secret-placeholder" not in str(error.value)
+    assert "unit-test-client-secret-placeholder" not in repr(error.value)
 
 
 def test_task_configuration_uses_exact_private_routes_and_shared_oidc_audience() -> None:
@@ -399,6 +444,47 @@ def test_deadline_route_reaches_guarded_posting_graph_once_and_then_deduplicates
     assert task_client.create_requests == []
 
 
+def test_deadline_route_refreshes_expiring_token_before_identity_and_post(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = StaticFplSource(bootstrap())
+    state_store = InMemoryPostingStateStore(claim_id_factory=lambda: "claim-1")
+    monkeypatch.setattr(
+        production,
+        "FirestorePostingStateStore",
+        lambda firestore_client: state_store,
+    )
+    token_store = valid_token_store(expires_at=DEADLINE_UTC)
+    refresh_transport = SuccessfulRefreshTransport()
+    x_transport = SuccessfulXTransport()
+    app = create_production_app(
+        valid_environment(),
+        fpl_source=source,
+        firestore_client=MagicMock(),
+        cloud_tasks_client=RecordingCloudTasksClient(),
+        x_transport=x_transport,
+        x_token_store=token_store,
+        x_refresh_transport=refresh_transport,
+        clock=lambda: DEADLINE_UTC,
+    )
+
+    response = app.test_client().post(
+        DEADLINE_TASK_ROUTE,
+        data=serialize_instruction(instruction()),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"result": "posted"}
+    assert len(refresh_transport.requests) == 1
+    assert [request.method for request in x_transport.requests] == ["GET", "POST"]
+    assert all(
+        request.headers["Authorization"] == "Bearer unit-test-refreshed-access-placeholder"
+        for request in x_transport.requests
+    )
+    assert token_store.read().state.refresh_token == "unit-test-refreshed-refresh-placeholder"
+
+
 def test_importing_production_module_constructs_no_clients_or_services(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -409,6 +495,7 @@ def test_importing_production_module_constructs_no_clients_or_services(
 
     monkeypatch.setattr(FplApiClient, "__init__", forbidden)
     monkeypatch.setattr(XApiClient, "__init__", forbidden)
+    monkeypatch.setattr(production.XOAuthRefreshClient, "__init__", forbidden)
     monkeypatch.setattr(firestore_v1, "Client", forbidden)
     monkeypatch.setattr(tasks_v2, "CloudTasksClient", forbidden)
     monkeypatch.setattr(ProductionRuntimeConfig, "from_environment", forbidden)
@@ -438,6 +525,7 @@ def test_no_service_account_key_file_is_required_for_injected_sdk_clients(
         firestore_client=MagicMock(),
         cloud_tasks_client=RecordingCloudTasksClient(),
         x_transport=ForbiddenXTransport(),
+        x_token_store=valid_token_store(),
         clock=lambda: CHECKER_TIME_UTC,
     )
 
@@ -453,6 +541,8 @@ def test_composition_reuses_existing_services_without_loops_or_parallel_clients(
         "GoogleCloudTasksAdapter",
         "GooglePreflightCloudTasksAdapter",
         "XApiClient",
+        "XOAuthRefreshClient",
+        "RefreshingXAccessTokenProvider",
         "DeadlinePostExecutionCoordinator",
         "DeadlineExecutionRevalidator",
         "DeadlinePlanner",

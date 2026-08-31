@@ -73,3 +73,23 @@ class XOAuthTokenExchangeError(XOAuthError):
 
 class XOAuthHandoffError(XOAuthError):
     """Raised when tokens cannot be handed off outside the repository."""
+
+
+class XTokenError(XApiError):
+    """Base class for safe unattended user-token acquisition failures."""
+
+
+class XTokenStateError(XTokenError):
+    """Raised when persisted OAuth token state is absent or invalid."""
+
+
+class XTokenRefreshError(XTokenError):
+    """Raised when OAuth refresh cannot produce a validated credential."""
+
+
+class XTokenStoreError(XTokenError):
+    """Raised when authoritative token state cannot be read or updated safely."""
+
+
+class XTokenConcurrencyError(XTokenError):
+    """Raised when a refresh race cannot be reconciled to valid authoritative state."""

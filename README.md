@@ -466,26 +466,57 @@ values:
 | `X_ENVIRONMENT` | Existing guarded X environment; currently only `test` is accepted. | No |
 | `X_POSTING_ENABLED` | Must be explicitly `true`; no token alone enables writing. | No |
 | `X_EXPECTED_USER_ID` | Immutable numeric ID verified through `/2/users/me` before every write. | No |
-| `X_USER_ACCESS_TOKEN` | OAuth 2.0 user-context access token injected at runtime. | **Yes** |
+| `X_OAUTH_CLIENT_ID` | Confidential OAuth client ID used for token refresh. | **Yes** |
+| `X_OAUTH_CLIENT_SECRET` | Confidential OAuth client secret used for token-endpoint authentication. | **Yes** |
 
 Firestore and Cloud Tasks use Application Default Credentials and the future Cloud Run service
-identity. No service-account key file is loaded by the application. The deployment layer should map
-the X access token from Secret Manager into the process environment; this repository does not fetch,
-provision, log, or persist that secret and does not provision Firestore, queues, IAM, Scheduler, or
-Cloud Run.
+identity. No service-account key file is loaded by the application. The static OAuth client secret
+may eventually be injected from Secret Manager as an environment variable. Mutable access and
+refresh tokens must instead come from the token-state store described below. This repository does
+not fetch, provision, log, or persist cloud secrets and does not provision Firestore, queues, IAM,
+Scheduler, or Cloud Run.
 
-Two X lifecycle items block unattended production-account deployment. First, the existing write
-guard intentionally supports only `X_ENVIRONMENT=test`; production-account enablement remains a
-separate reviewed change. Second, OAuth authorization returns an expiring access token and a refresh
-token because `offline.access` is requested. The encrypted local handoff retains both plus the
-provider's `expires_in` value, but the runtime client accepts only the access token and the codebase
-has no refresh-token grant or managed rotation path. Before a season-long rehearsal, implement and
-review confidential-client refresh, safe refresh-token storage/rotation, and refreshed access-token
-injection. Do not assume the current test access token remains valid indefinitely.
+Production-account deployment remains blocked in two explicit ways. The write guard still accepts
+only `X_ENVIRONMENT=test`, and cloud deployment still needs a secure distributed implementation of
+the token-state store. The production factory accepts that boundary explicitly and refuses to build
+the posting graph without it; this milestone adds no cloud token-store adapter or secret resource.
 
 This milestone adds composition only: it does not change the 06:00 planning decision, five-minute
 preflight, exact-deadline task identity, live revalidation, event-level idempotency, X identity
 guard, or retry behaviour.
+
+## Unattended X Token Refresh
+
+X documents that Authorization Code with PKCE access tokens normally last two hours and that
+requesting `offline.access` yields a refresh token. The confidential-client refresh request is a
+form-encoded `POST https://api.x.com/2/oauth2/token` with `grant_type=refresh_token`, the current
+refresh token, and HTTP Basic Client ID/Client Secret authentication. See X's current
+[authorization-code guide](https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code)
+and [user-token guide](https://docs.x.com/fundamentals/authentication/oauth-2-0/user-access-token).
+
+`RefreshingXAccessTokenProvider` reads immutable token state containing the access token, refresh
+token, required scopes, and timezone-aware UTC expiry. It refreshes before the credential is expired
+or within the fixed five-minute safety margin. A refresh response must contain a Bearer access token,
+a positive lifetime, and all V1 scopes: `tweet.read`, `users.read`, `tweet.write`, and
+`offline.access`. Under OAuth 2.0 refresh semantics, a returned replacement refresh token becomes
+authoritative; when no replacement is returned, the previous refresh token remains in the new state.
+Validated replacement state must be durably stored before its access token reaches the X client.
+
+Token persistence is behind a versioned compare-and-swap interface. A concurrent loser cannot
+overwrite a newer token generation: it re-reads and may use the already-valid authoritative state,
+without an internal retry loop. The included in-memory store is deterministic test support, not a
+production lock or cloud persistence mechanism. Cloud deployment still requires a secure, mutable,
+distributed store implementing these semantics. Ordinary Secret Manager environment injection is
+insufficient for rotating token state because an environment value is fixed for the lifetime of a
+Cloud Run instance or revision; Google documents that
+[secret environment variables are resolved at instance startup](https://cloud.google.com/run/docs/configuring/services/secrets).
+Do not store refresh tokens in Firestore.
+
+The posting order remains: durable event claim, persisted `posting_in_progress`, valid-token
+acquisition or refresh, `/2/users/me`, exact numeric account-ID verification, and at most one
+`POST /2/tweets`. Refresh failures are definite pre-write failures, never ambiguous X writes. The
+standalone test-post runner remains explicitly gated and continues accepting its deliberately
+supplied static `X_USER_ACCESS_TOKEN`; it does not silently opt into unattended refresh.
 
 ## Requirements and Installation
 

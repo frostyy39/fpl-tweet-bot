@@ -34,6 +34,16 @@ from fpl_bot.service import FplDataSource
 from fpl_bot.task_arming import DeadlineTaskArmer
 from fpl_bot.x_api import XApiClient, XHttpTransport
 from fpl_bot.x_config import XPostingConfig
+from fpl_bot.x_oauth import (
+    X_OAUTH_CLIENT_ID_VARIABLE,
+    X_OAUTH_CLIENT_SECRET_VARIABLE,
+    OAuthClientCredentials,
+)
+from fpl_bot.x_token_refresh import (
+    RefreshingXAccessTokenProvider,
+    XOAuthRefreshClient,
+    XTokenStateStore,
+)
 
 GCP_PROJECT_ID_VARIABLE = "GCP_PROJECT_ID"
 FIRESTORE_DATABASE_ID_VARIABLE = "FIRESTORE_DATABASE_ID"
@@ -60,6 +70,7 @@ class ProductionRuntimeConfig:
     deadline_tasks: CloudTasksConfig
     preflight_tasks: CloudTasksConfig
     x_posting: XPostingConfig = field(repr=False)
+    x_oauth_credentials: OAuthClientCredentials = field(repr=False)
 
     @classmethod
     def from_environment(
@@ -108,7 +119,11 @@ class ProductionRuntimeConfig:
             oidc_audience=oidc_audience or base_url,
         )
         x_posting = XPostingConfig.from_environment(source)
-        x_posting.require_posting_guards()
+        x_posting.require_posting_identity_guard()
+        x_oauth_credentials = OAuthClientCredentials(
+            client_id=_required_value(source, X_OAUTH_CLIENT_ID_VARIABLE),
+            client_secret=_required_value(source, X_OAUTH_CLIENT_SECRET_VARIABLE),
+        )
 
         return cls(
             gcp_project_id=project_id,
@@ -116,6 +131,7 @@ class ProductionRuntimeConfig:
             deadline_tasks=deadline_tasks,
             preflight_tasks=preflight_tasks,
             x_posting=x_posting,
+            x_oauth_credentials=x_oauth_credentials,
         )
 
 
@@ -129,11 +145,17 @@ def create_production_app(
     firestore_client: FirestoreClient | None = None,
     cloud_tasks_client: Any | None = None,
     x_transport: XHttpTransport | None = None,
+    x_token_store: XTokenStateStore | None = None,
+    x_refresh_transport: XHttpTransport | None = None,
     clock: Clock | None = None,
 ) -> Flask:
     """Validate configuration and compose the existing V1 graph into one Flask app."""
 
     config = ProductionRuntimeConfig.from_environment(environ)
+    if x_token_store is None:
+        raise ProductionConfigurationError(
+            "A mutable secure X token-state store with distributed compare-and-swap is required"
+        )
     source = fpl_source if fpl_source is not None else FplApiClient()
     state_store = FirestorePostingStateStore(
         firestore_client if firestore_client is not None else _default_firestore_client(config)
@@ -142,7 +164,17 @@ def create_production_app(
         cloud_tasks_client if cloud_tasks_client is not None else _default_cloud_tasks_client()
     )
 
-    x_client = XApiClient(config.x_posting, transport=x_transport)
+    token_provider = RefreshingXAccessTokenProvider(
+        x_token_store,
+        XOAuthRefreshClient(transport=x_refresh_transport, now=clock),
+        config.x_oauth_credentials,
+        clock=clock,
+    )
+    x_client = XApiClient(
+        config.x_posting,
+        transport=x_transport,
+        token_provider=token_provider,
+    )
     post_executor = DeadlinePostExecutionCoordinator(state_store, x_client, clock=clock)
     revalidator = DeadlineExecutionRevalidator(
         source,
