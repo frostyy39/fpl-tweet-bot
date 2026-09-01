@@ -65,6 +65,12 @@ def valid_environment() -> dict[str, str]:
     }
 
 
+def disabled_environment() -> dict[str, str]:
+    environ = valid_environment()
+    environ["X_POSTING_ENABLED"] = "false"
+    return environ
+
+
 def bootstrap(deadline: datetime = DEADLINE_UTC) -> dict[str, Any]:
     return {
         "events": [
@@ -247,6 +253,31 @@ def test_valid_configuration_builds_all_three_routes_without_external_activity()
     assert x_transport.requests == []
 
 
+def test_disabled_posting_configuration_builds_without_external_activity() -> None:
+    source = StaticFplSource(bootstrap())
+    firestore_client = MagicMock()
+    task_client = RecordingCloudTasksClient()
+    x_transport = ForbiddenXTransport()
+
+    app = create_production_app(
+        disabled_environment(),
+        fpl_source=source,
+        firestore_client=firestore_client,
+        cloud_tasks_client=task_client,
+        x_transport=x_transport,
+        x_token_store=valid_token_store(),
+        clock=lambda: CHECKER_TIME_UTC,
+    )
+
+    assert app is not None
+    assert source.bootstrap_calls == 0
+    assert source.fixture_calls == 0
+    firestore_client.transaction.assert_not_called()
+    assert task_client.create_requests == []
+    assert task_client.get_requests == []
+    assert x_transport.requests == []
+
+
 def test_production_factory_constructs_cloud_token_store_without_reading_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -264,7 +295,7 @@ def test_production_factory_constructs_cloud_token_store_without_reading_it(
 
     monkeypatch.setattr(production, "GoogleCloudXTokenStateStore", FakeCloudStore)
     app = create_production_app(
-        valid_environment(),
+        disabled_environment(),
         fpl_source=StaticFplSource(bootstrap()),
         firestore_client=MagicMock(),
         cloud_tasks_client=RecordingCloudTasksClient(),
@@ -362,6 +393,32 @@ def test_malformed_expected_x_user_id_fails_closed() -> None:
 
     with pytest.raises(XConfigurationError, match="positive numeric"):
         ProductionRuntimeConfig.from_environment(environ)
+
+
+@pytest.mark.parametrize("posting_enabled", ["true", "false"])
+def test_unsupported_x_environment_fails_closed(posting_enabled: str) -> None:
+    environ = valid_environment()
+    environ["X_ENVIRONMENT"] = "production"
+    environ["X_POSTING_ENABLED"] = posting_enabled
+
+    with pytest.raises(XConfigurationError, match="no production mode"):
+        ProductionRuntimeConfig.from_environment(environ)
+
+
+def test_disabled_production_configuration_still_requires_expected_identity() -> None:
+    environ = disabled_environment()
+    environ.pop("X_EXPECTED_USER_ID")
+
+    with pytest.raises(XConfigurationError, match="X_EXPECTED_USER_ID is required"):
+        ProductionRuntimeConfig.from_environment(environ)
+
+
+def test_malformed_posting_enabled_configuration_fails_before_app_creation() -> None:
+    environ = valid_environment()
+    environ["X_POSTING_ENABLED"] = "yes"
+
+    with pytest.raises(XConfigurationError, match="either 'true' or 'false'"):
+        create_production_app(environ)
 
 
 def test_missing_x_oauth_client_secret_fails_without_secret_output() -> None:

@@ -56,6 +56,10 @@ class XPostingConfig:
             raise XConfigurationError(
                 f"X posting is disabled; set {X_POSTING_ENABLED_VARIABLE}=true explicitly"
             )
+        return self.require_configured_identity()
+
+    def require_configured_identity(self) -> str:
+        """Validate the configured test-account identity without enabling writes."""
         if self.environment != TEST_ENVIRONMENT:
             raise XConfigurationError(
                 f"{X_ENVIRONMENT_VARIABLE} must be {TEST_ENVIRONMENT!r}; "

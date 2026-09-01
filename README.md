@@ -464,7 +464,7 @@ values:
 | `CLOUD_TASKS_CALLER_SERVICE_ACCOUNT_EMAIL` | Service identity attached to task OIDC tokens. | No |
 | `CLOUD_TASKS_OIDC_AUDIENCE` | Optional OIDC audience; defaults to the Cloud Run origin. | No |
 | `X_ENVIRONMENT` | Existing guarded X environment; currently only `test` is accepted. | No |
-| `X_POSTING_ENABLED` | Must be explicitly `true`; no token alone enables writing. | No |
+| `X_POSTING_ENABLED` | Use `false` for safe deployment/smoke testing; every X write still requires explicit `true`. | No |
 | `X_EXPECTED_USER_ID` | Immutable numeric ID verified through `/2/users/me` before every write. | No |
 | `X_TOKEN_SECRET_ID` | Existing Secret Manager secret that holds versioned OAuth token-state payloads. | No |
 | `X_OAUTH_CLIENT_ID` | Confidential OAuth client ID used for token refresh. | **Yes** |

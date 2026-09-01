@@ -127,7 +127,7 @@ class ProductionRuntimeConfig:
             oidc_audience=oidc_audience or base_url,
         )
         x_posting = XPostingConfig.from_environment(source)
-        expected_user_id = x_posting.require_posting_identity_guard()
+        expected_user_id = x_posting.require_configured_identity()
         x_token_secret_id = _required_value(source, X_TOKEN_SECRET_ID_VARIABLE)
         try:
             CloudXTokenStateStoreConfig(

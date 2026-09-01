@@ -27,6 +27,41 @@ def test_environment_configuration_parses_explicit_test_write_guards() -> None:
     assert config.expected_user_id == "123456789"
 
 
+def test_configured_identity_validation_allows_posting_to_remain_disabled() -> None:
+    config = XPostingConfig(
+        environment="test",
+        posting_enabled=False,
+        expected_user_id="123456789",
+    )
+
+    assert config.require_configured_identity() == "123456789"
+    with pytest.raises(XConfigurationError, match="posting is disabled"):
+        config.require_posting_identity_guard()
+
+
+@pytest.mark.parametrize(
+    ("environment", "expected_user_id", "message"),
+    [
+        ("production", "123456789", "no production mode"),
+        ("test", None, "X_EXPECTED_USER_ID is required"),
+        ("test", "not-numeric", "positive numeric"),
+    ],
+)
+def test_configured_identity_validation_fails_closed_while_posting_is_disabled(
+    environment: str,
+    expected_user_id: str | None,
+    message: str,
+) -> None:
+    config = XPostingConfig(
+        environment=environment,
+        posting_enabled=False,
+        expected_user_id=expected_user_id,
+    )
+
+    with pytest.raises(XConfigurationError, match=message):
+        config.require_configured_identity()
+
+
 def test_invalid_posting_enabled_value_is_rejected() -> None:
     with pytest.raises(XConfigurationError, match="either 'true' or 'false'"):
         XPostingConfig.from_environment({"X_POSTING_ENABLED": "yes"})
