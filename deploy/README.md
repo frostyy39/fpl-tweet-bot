@@ -1,9 +1,10 @@
-# Google Cloud V1 foundation
+# Google Cloud V1 foundation and private deployment
 
-This guide reproduces the non-posting Google Cloud foundation for FPL Bot V1. It intentionally
-stops before Cloud Run deployment, Cloud Scheduler creation, OAuth token bootstrap, or enabling X
-posting. Run each command from an authenticated `gcloud` session after separately confirming the
-target project and billing account. Never reuse the retired project.
+This guide reproduces the Google Cloud foundation and first private, posting-disabled Cloud Run
+deployment for FPL Bot V1. It intentionally stops before Cloud Scheduler creation, mutable OAuth
+token bootstrap, or enabling X posting. Run each command from an authenticated `gcloud` session
+after separately confirming the target project and billing account. Never reuse the retired
+project.
 
 ## Parameters and stable resource names
 
@@ -18,6 +19,10 @@ $InvokerServiceAccount = "fpl-bot-invoker"
 $Repository = "fpl-bot"
 $Queue = "fpl-deadline"
 $TokenSecret = "x-oauth-token-state"
+$StaticClientIdSecret = "x-oauth-client-id"
+$StaticClientSecretSecret = "x-oauth-client-secret"
+$Service = "fpl-bot"
+$ExpectedXUserId = "<approved-test-account-numeric-id>"
 $SourceCommit = "<reviewed-git-commit>"
 ```
 
@@ -31,7 +36,7 @@ Stable V1 resource names are:
 | Cloud Tasks queue | `fpl-deadline` | `europe-west2` |
 | Runtime service account | `fpl-bot-runtime` | global IAM resource |
 | OIDC caller service account | `fpl-bot-invoker` | global IAM resource |
-| Future private Cloud Run service | `fpl-bot` | `europe-west2` |
+| Private Cloud Run service | `fpl-bot` | `europe-west2` |
 
 ## Project and APIs
 
@@ -162,9 +167,84 @@ gcloud artifacts docker images describe $Image --project=$ProjectId `
   --format="value(image_summary.fully_qualified_digest)"
 ```
 
-## Verification stop point
+## Private posting-disabled Cloud Run deployment
 
-Before deployment, verify:
+Create separate regional secrets for the static OAuth client configuration. Add exactly one
+version to each using an approved local secure-input process and `--data-file=-`; do not put either
+value on a command line, in shell history, or in a tracked file. Ensure the secure-input process
+writes the exact value without adding a newline. The mutable `$TokenSecret` remains at zero
+versions until the separately reviewed user-token bootstrap.
+
+```powershell
+gcloud secrets create $StaticClientIdSecret --project=$ProjectId `
+  --replication-policy=user-managed --locations=$Region
+gcloud secrets create $StaticClientSecretSecret --project=$ProjectId `
+  --replication-policy=user-managed --locations=$Region
+
+# Supply each value through a hidden, non-logging stdin process:
+gcloud secrets versions add $StaticClientIdSecret --project=$ProjectId --data-file=-
+gcloud secrets versions add $StaticClientSecretSecret --project=$ProjectId --data-file=-
+
+gcloud secrets add-iam-policy-binding $StaticClientIdSecret --project=$ProjectId `
+  --member="serviceAccount:$RuntimeEmail" --role="roles/secretmanager.secretAccessor"
+gcloud secrets add-iam-policy-binding $StaticClientSecretSecret --project=$ProjectId `
+  --member="serviceAccount:$RuntimeEmail" --role="roles/secretmanager.secretAccessor"
+```
+
+Resolve the reviewed image to its full digest. Because the application validates its own future
+task target and audience at startup, use a syntactically valid non-operational HTTPS sentinel only
+for the initial private revision. Do not invoke any workflow route on that revision.
+
+```powershell
+$ImageDigest = "<$Region-docker.pkg.dev/$ProjectId/$Repository/fpl-bot@sha256:reviewed-digest>"
+$SentinelOrigin = "https://not-configured.invalid"
+
+gcloud run deploy $Service --project=$ProjectId --region=$Region --platform=managed `
+  --image=$ImageDigest --service-account=$RuntimeEmail --no-allow-unauthenticated `
+  --min-instances=0 --max-instances=2 --concurrency=2 --cpu=1 --memory=512Mi `
+  --port=8080 --ingress=all `
+  --set-env-vars="GCP_PROJECT_ID=$ProjectId,FIRESTORE_DATABASE_ID=(default),CLOUD_TASKS_LOCATION_ID=$Region,CLOUD_TASKS_QUEUE_ID=$Queue,CLOUD_RUN_BASE_URL=$SentinelOrigin,CLOUD_TASKS_CALLER_SERVICE_ACCOUNT_EMAIL=$InvokerEmail,CLOUD_TASKS_OIDC_AUDIENCE=$SentinelOrigin,X_ENVIRONMENT=test,X_POSTING_ENABLED=false,X_EXPECTED_USER_ID=$ExpectedXUserId,X_TOKEN_SECRET_ID=$TokenSecret" `
+  --set-secrets="X_OAUTH_CLIENT_ID=${StaticClientIdSecret}:1,X_OAUTH_CLIENT_SECRET=${StaticClientSecretSecret}:1"
+```
+
+Read the service URL returned by Cloud Run; do not derive or predict it. Replace both sentinels
+with that exact service origin, wait for the corrected revision, and ensure only it receives
+traffic.
+
+```powershell
+gcloud run services describe $Service --project=$ProjectId --region=$Region
+$ServiceUrl = "<exact-service-url-returned-by-cloud-run>"
+
+gcloud run services update $Service --project=$ProjectId --region=$Region `
+  --update-env-vars="CLOUD_RUN_BASE_URL=$ServiceUrl,CLOUD_TASKS_OIDC_AUDIENCE=$ServiceUrl"
+
+gcloud run services add-iam-policy-binding $Service --project=$ProjectId --region=$Region `
+  --member="serviceAccount:$InvokerEmail" --role="roles/run.invoker"
+```
+
+Keep the service private: there must be no `allUsers` invoker binding. Test only a harmless
+nonexistent path. The anonymous request must be rejected by IAM, while an authorized caller should
+pass IAM and receive Flask's ordinary `404`. Never use a workflow route for deployment smoke
+testing.
+
+```powershell
+$SmokeUrl = "$ServiceUrl/__smoke/not-found"
+Invoke-WebRequest $SmokeUrl -SkipHttpErrorCheck  # expected 403
+
+$IdentityToken = gcloud auth print-identity-token
+Invoke-WebRequest $SmokeUrl -Headers @{Authorization="Bearer $IdentityToken"} `
+  -SkipHttpErrorCheck  # expected 404 for an authorized operator
+$IdentityToken = $null
+```
+
+The deployed service uses ADC through `$RuntimeEmail`, one CPU, `512Mi`, concurrency `2`, minimum
+instances `0`, and maximum instances `2`. It has no VPC connector, Cloud NAT, static outbound IP,
+or service-account key. Static secret environment references are pinned to explicit numeric
+versions because Cloud Run resolves environment-variable secrets when an instance starts.
+
+## Verification
+
+Verify the relevant resource state before deployment and repeat these checks afterward:
 
 ```powershell
 gcloud config get-value project
@@ -181,17 +261,17 @@ gcloud run services list --project=$ProjectId --region=$Region
 gcloud scheduler jobs list --project=$ProjectId --location=$Region
 ```
 
-Expected foundation state is one empty Tasks queue, an empty Firestore database, zero token-secret
-versions, no user-managed service-account keys, no Cloud Run service, and no Scheduler job. X
-posting remains disabled and no OAuth credential is loaded.
+After the private deployment, expected state is one empty Tasks queue, no token-authority document,
+zero mutable token-secret versions, one enabled version on each static OAuth client secret, no
+user-managed service-account keys, one scale-to-zero private Cloud Run service, and no Scheduler
+job. `X_POSTING_ENABLED=false`; no OAuth refresh, X identity request, or X Post has occurred.
 
-## Later deployment and teardown
+## Later bootstrap and teardown
 
-The first deployment must use the captured image digest, the existing `create_production_app()`
-container, minimum instances `0`, the runtime service account, private ingress/authentication, and
-the environment-variable contract in the root README. Bootstrap the approved test-account OAuth
-state only in a separately reviewed milestone; never place token state or OAuth client secrets in
-tracked files or the image.
+Bootstrap the approved test-account OAuth state only in a separately reviewed milestone; never
+place token state or OAuth client secrets in tracked files or the image. Keep posting disabled
+until that bootstrap, identity verification, and an explicit posting-enablement review are
+complete.
 
 For teardown, first disable any Scheduler job, then remove the Cloud Run service, queue, image
 repository, token secret, Firestore database, service accounts, and finally billing/project only
