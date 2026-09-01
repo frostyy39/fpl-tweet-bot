@@ -582,6 +582,9 @@ factory once when starting the web application, and missing required configurati
 without printing secret values. No custom health or admin route is added; successful server startup
 is the runtime health signal.
 
+The parameterized, non-secret Google Cloud foundation commands, IAM scopes, image-build procedure,
+verification stop point, and teardown guidance are documented in [deploy/README.md](deploy/README.md).
+
 ## Requirements and Installation
 
 - Python 3.11 or newer
