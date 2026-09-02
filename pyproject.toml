@@ -28,6 +28,7 @@ fpl-bot = "fpl_bot.cli:main"
 fpl-bot-x-authorize = "fpl_bot.x_oauth_cli:main"
 fpl-bot-x-test-post = "fpl_bot.test_post:main"
 fpl-bot-x-bootstrap = "fpl_bot.x_token_bootstrap_cli:main"
+fpl-bot-x-verify = "fpl_bot.x_oauth_verify_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

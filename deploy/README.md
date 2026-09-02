@@ -308,6 +308,44 @@ revision is `1`, no lease is active, the queue remains empty, Scheduler remains 
 Run still has `X_POSTING_ENABLED=false`. Controlled refresh and identity verification are separate
 later reviews.
 
+## Controlled OAuth refresh and identity verification
+
+This is a one-shot credential check, not a Post test. First build a reviewed immutable image that
+contains the project-number canonicalization and the `fpl-bot-x-verify` command. Update the private
+Cloud Run service to that digest and include the non-secret `GCP_PROJECT_NUMBER` setting, while
+keeping `X_ENVIRONMENT=test` and `X_POSTING_ENABLED=false`.
+
+Create a temporary Cloud Run Job from the same immutable digest and runtime identity. Give it the
+same validated runtime environment and explicit static-secret version references as the service.
+The verifier reads the existing Firestore authority and exact Secret Manager token generation
+through ADC, uses the existing distributed refresh lease/CAS provider when the access token is
+expired or within its safety margin, and only releases a newly refreshed access token after the
+replacement generation is authoritative. It then makes exactly one read-only `/2/users/me`
+request and requires the returned numeric ID to equal `X_EXPECTED_USER_ID`. It has no Post client,
+posting coordinator, HTTP route, or `/2/tweets` capability.
+
+Configure the Job for one attempt only. Platform retries are deliberately disabled so an ambiguous
+OAuth operation is never automatically repeated:
+
+```powershell
+$VerificationJob = "fpl-bot-x-oauth-verify"
+
+gcloud run jobs deploy $VerificationJob --project=$ProjectId --region=$Region `
+  --image=$ImageDigest --service-account=$RuntimeEmail `
+  --command=fpl-bot-x-verify --tasks=1 --parallelism=1 --max-retries=0 `
+  --set-env-vars="GCP_PROJECT_ID=$ProjectId,GCP_PROJECT_NUMBER=$ProjectNumber,FIRESTORE_DATABASE_ID=(default),CLOUD_TASKS_LOCATION_ID=$Region,CLOUD_TASKS_QUEUE_ID=$Queue,CLOUD_RUN_BASE_URL=$ServiceUrl,CLOUD_TASKS_CALLER_SERVICE_ACCOUNT_EMAIL=$InvokerEmail,CLOUD_TASKS_OIDC_AUDIENCE=$ServiceUrl,X_ENVIRONMENT=test,X_POSTING_ENABLED=false,X_EXPECTED_USER_ID=$ExpectedXUserId,X_TOKEN_SECRET_ID=$TokenSecret" `
+  --set-secrets="X_OAUTH_CLIENT_ID=${StaticClientIdSecret}:1,X_OAUTH_CLIENT_SECRET=${StaticClientSecretSecret}:1"
+
+gcloud run jobs execute $VerificationJob --project=$ProjectId --region=$Region --wait
+```
+
+Inspect only the command's non-secret result and the Firestore/Secret Manager authority metadata.
+Success means the expected numeric test-account ID was verified; it does not authorize posting.
+Confirm that the authority revision advanced if refresh was required, the new explicit token
+version is enabled, the refresh lease is clear, `X_POSTING_ENABLED` remains false, the queue remains
+empty, and Scheduler remains absent. The temporary Job may then be deleted under a separate
+approved operation. No Scheduler should ever target this Job.
+
 ## Teardown
 
 For teardown, first disable any Scheduler job, then remove the Cloud Run service, queue, image

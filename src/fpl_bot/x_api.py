@@ -68,6 +68,12 @@ class XAccessTokenProvider(Protocol):
     def get_valid_access_token(self) -> str: ...
 
 
+class XIdentityReader(Protocol):
+    """Read-only boundary for the authenticated X user."""
+
+    def get_authenticated_user(self) -> AuthenticatedXUser: ...
+
+
 class XHttpTransport(Protocol):
     def send(self, request: XHttpRequest, timeout_seconds: float) -> XHttpResponse: ...
 
@@ -113,8 +119,8 @@ class UrllibXHttpTransport:
             raise XTransportError("X API network request failed") from exc
 
 
-class XApiClient:
-    """Retrieve X identity and create guarded text Posts through API v2."""
+class XIdentityClient:
+    """Retrieve only the authenticated X identity through API v2."""
 
     def __init__(
         self,
@@ -136,10 +142,60 @@ class XApiClient:
         return self._get_authenticated_user(token)
 
     def _get_authenticated_user(self, token: str) -> AuthenticatedXUser:
-        response = self._send("GET", "2/users/me", token=token)
+        request = XHttpRequest(
+            method="GET",
+            url=f"{X_API_BASE_URL}2/users/me",
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {token}",
+                "User-Agent": X_USER_AGENT,
+            },
+        )
+        response = self._transport.send(request, self._timeout_seconds)
         self._raise_for_read_status(response)
         payload = _decode_json(response.body)
         return _parse_authenticated_user(payload)
+
+    def _get_valid_access_token(self) -> str:
+        token = (
+            self._token_provider.get_valid_access_token()
+            if self._token_provider is not None
+            else self._config.require_user_access_token()
+        )
+        if (
+            not isinstance(token, str)
+            or not token
+            or token != token.strip()
+            or not token.isprintable()
+        ):
+            raise XConfigurationError("X access-token provider returned no valid credential")
+        return token
+
+    @staticmethod
+    def _raise_for_read_status(response: XHttpResponse) -> None:
+        if response.status_code == 200:
+            return
+        if 400 <= response.status_code < 500:
+            XIdentityClient._raise_for_definite_rejection(response)
+        raise XApiResponseError(
+            _http_error_message("X API read failed", response),
+            response.status_code,
+        )
+
+    @staticmethod
+    def _raise_for_definite_rejection(response: XHttpResponse) -> None:
+        message = _http_error_message("X API rejected the request", response)
+        if response.status_code == 401:
+            raise XAuthenticationError(message, response.status_code)
+        if response.status_code == 403:
+            raise XPermissionError(message, response.status_code)
+        if response.status_code == 429:
+            raise XRateLimitError(message, response.status_code)
+        raise XRequestRejectedError(message, response.status_code)
+
+
+class XApiClient(XIdentityClient):
+    """Create guarded text Posts after the inherited read-only identity check."""
 
     def create_text_post(self, text: str) -> CreatedXPost:
         """Create exactly the supplied text after all configuration and identity guards pass."""
@@ -154,8 +210,19 @@ class XApiClient:
             )
 
         body = json.dumps({"text": text}, ensure_ascii=False, separators=(",", ":")).encode()
+        request = XHttpRequest(
+            method="POST",
+            url=f"{X_API_BASE_URL}2/tweets",
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "User-Agent": X_USER_AGENT,
+            },
+            body=body,
+        )
         try:
-            response = self._send("POST", "2/tweets", token=token, body=body)
+            response = self._transport.send(request, self._timeout_seconds)
         except XTransportError as exc:
             raise XAmbiguousWriteError(
                 "X create-Post connection failed after the write was attempted; outcome may be "
@@ -178,66 +245,6 @@ class XApiClient:
                 "X returned HTTP 201 without a fully validated create-Post response; "
                 "do not retry automatically"
             ) from exc
-
-    def _send(
-        self,
-        method: str,
-        relative_url: str,
-        *,
-        token: str,
-        body: bytes | None = None,
-    ) -> XHttpResponse:
-        headers = {
-            "Accept": "application/json",
-            "Authorization": f"Bearer {token}",
-            "User-Agent": X_USER_AGENT,
-        }
-        if body is not None:
-            headers["Content-Type"] = "application/json"
-        request = XHttpRequest(
-            method=method,
-            url=f"{X_API_BASE_URL}{relative_url}",
-            headers=headers,
-            body=body,
-        )
-        return self._transport.send(request, self._timeout_seconds)
-
-    def _get_valid_access_token(self) -> str:
-        token = (
-            self._token_provider.get_valid_access_token()
-            if self._token_provider is not None
-            else self._config.require_user_access_token()
-        )
-        if (
-            not isinstance(token, str)
-            or not token
-            or token != token.strip()
-            or not token.isprintable()
-        ):
-            raise XConfigurationError("X access-token provider returned no valid credential")
-        return token
-
-    @staticmethod
-    def _raise_for_read_status(response: XHttpResponse) -> None:
-        if response.status_code == 200:
-            return
-        if 400 <= response.status_code < 500:
-            XApiClient._raise_for_definite_rejection(response)
-        raise XApiResponseError(
-            _http_error_message("X API read failed", response),
-            response.status_code,
-        )
-
-    @staticmethod
-    def _raise_for_definite_rejection(response: XHttpResponse) -> None:
-        message = _http_error_message("X API rejected the request", response)
-        if response.status_code == 401:
-            raise XAuthenticationError(message, response.status_code)
-        if response.status_code == 403:
-            raise XPermissionError(message, response.status_code)
-        if response.status_code == 429:
-            raise XRateLimitError(message, response.status_code)
-        raise XRequestRejectedError(message, response.status_code)
 
 
 def _decode_json(body: bytes) -> Mapping[str, Any]:

@@ -1,7 +1,6 @@
 """Explicit production dependency composition with no import-time side effects."""
 
 import os
-import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -10,6 +9,7 @@ from urllib.parse import urlsplit
 
 from flask import Flask
 
+from fpl_bot import runtime_config as _runtime_config
 from fpl_bot.api import FplApiClient
 from fpl_bot.cloud_tasks import (
     CloudTasksConfig,
@@ -30,43 +30,38 @@ from fpl_bot.deadline_http_app import (
 )
 from fpl_bot.deadline_planning import DeadlinePlanner
 from fpl_bot.deadline_revalidation import DeadlineExecutionRevalidator
-from fpl_bot.errors import FplBotError
 from fpl_bot.firestore_state import FirestoreClient, FirestorePostingStateStore
 from fpl_bot.post_execution import DeadlinePostExecutionCoordinator
 from fpl_bot.preflight import DeadlinePreflight
 from fpl_bot.preflight_arming import PreflightTaskArmer
+from fpl_bot.runtime_config import (
+    ProductionConfigurationError,
+    XCloudRuntimeConfig,
+    optional_runtime_value,
+    required_runtime_value,
+)
 from fpl_bot.service import FplDataSource
 from fpl_bot.task_arming import DeadlineTaskArmer
 from fpl_bot.x_api import XApiClient, XHttpTransport
 from fpl_bot.x_config import XPostingConfig
-from fpl_bot.x_errors import XTokenStateError
-from fpl_bot.x_oauth import (
-    X_OAUTH_CLIENT_ID_VARIABLE,
-    X_OAUTH_CLIENT_SECRET_VARIABLE,
-    OAuthClientCredentials,
-)
+from fpl_bot.x_oauth import OAuthClientCredentials
 from fpl_bot.x_token_refresh import (
     RefreshingXAccessTokenProvider,
     XOAuthRefreshClient,
     XTokenStateStore,
 )
 
-GCP_PROJECT_ID_VARIABLE = "GCP_PROJECT_ID"
-GCP_PROJECT_NUMBER_VARIABLE = "GCP_PROJECT_NUMBER"
-FIRESTORE_DATABASE_ID_VARIABLE = "FIRESTORE_DATABASE_ID"
+GCP_PROJECT_ID_VARIABLE = _runtime_config.GCP_PROJECT_ID_VARIABLE
+GCP_PROJECT_NUMBER_VARIABLE = _runtime_config.GCP_PROJECT_NUMBER_VARIABLE
+FIRESTORE_DATABASE_ID_VARIABLE = _runtime_config.FIRESTORE_DATABASE_ID_VARIABLE
+X_TOKEN_SECRET_ID_VARIABLE = _runtime_config.X_TOKEN_SECRET_ID_VARIABLE
+DEFAULT_FIRESTORE_DATABASE_ID = _runtime_config.DEFAULT_FIRESTORE_DATABASE_ID
+
 CLOUD_TASKS_LOCATION_ID_VARIABLE = "CLOUD_TASKS_LOCATION_ID"
 CLOUD_TASKS_QUEUE_ID_VARIABLE = "CLOUD_TASKS_QUEUE_ID"
 CLOUD_RUN_BASE_URL_VARIABLE = "CLOUD_RUN_BASE_URL"
 CLOUD_TASKS_CALLER_SERVICE_ACCOUNT_EMAIL_VARIABLE = "CLOUD_TASKS_CALLER_SERVICE_ACCOUNT_EMAIL"
 CLOUD_TASKS_OIDC_AUDIENCE_VARIABLE = "CLOUD_TASKS_OIDC_AUDIENCE"
-X_TOKEN_SECRET_ID_VARIABLE = "X_TOKEN_SECRET_ID"
-
-DEFAULT_FIRESTORE_DATABASE_ID = "(default)"
-FIRESTORE_DATABASE_ID_PATTERN = re.compile(r"(?:\(default\)|[a-z][a-z0-9-]{2,61}[a-z0-9])\Z")
-
-
-class ProductionConfigurationError(FplBotError):
-    """Raised before adapter construction when runtime configuration is incomplete."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,15 +84,6 @@ class ProductionRuntimeConfig:
     ) -> "ProductionRuntimeConfig":
         source = os.environ if environ is None else environ
         project_id = _required_value(source, GCP_PROJECT_ID_VARIABLE)
-        project_number = _required_value(source, GCP_PROJECT_NUMBER_VARIABLE)
-        if (
-            not project_number.isascii()
-            or not project_number.isdigit()
-            or project_number.startswith("0")
-        ):
-            raise ProductionConfigurationError(
-                f"{GCP_PROJECT_NUMBER_VARIABLE} must be a positive numeric project number"
-            )
         location_id = _required_value(source, CLOUD_TASKS_LOCATION_ID_VARIABLE)
         queue_id = _required_value(source, CLOUD_TASKS_QUEUE_ID_VARIABLE)
         base_url = _validated_base_url(_required_value(source, CLOUD_RUN_BASE_URL_VARIABLE))
@@ -109,18 +95,6 @@ class ProductionRuntimeConfig:
             source.get(CLOUD_TASKS_OIDC_AUDIENCE_VARIABLE),
             CLOUD_TASKS_OIDC_AUDIENCE_VARIABLE,
         )
-        database_id = (
-            _optional_value(
-                source.get(FIRESTORE_DATABASE_ID_VARIABLE),
-                FIRESTORE_DATABASE_ID_VARIABLE,
-            )
-            or DEFAULT_FIRESTORE_DATABASE_ID
-        )
-        if not FIRESTORE_DATABASE_ID_PATTERN.fullmatch(database_id):
-            raise ProductionConfigurationError(
-                f"{FIRESTORE_DATABASE_ID_VARIABLE} is not a valid Firestore database ID"
-            )
-
         deadline_tasks = CloudTasksConfig(
             project_id=project_id,
             location_id=location_id,
@@ -137,34 +111,16 @@ class ProductionRuntimeConfig:
             service_account_email=caller_email,
             oidc_audience=oidc_audience or base_url,
         )
-        x_posting = XPostingConfig.from_environment(source)
-        expected_user_id = x_posting.require_configured_identity()
-        x_token_secret_id = _required_value(source, X_TOKEN_SECRET_ID_VARIABLE)
-        try:
-            CloudXTokenStateStoreConfig(
-                project_id=project_id,
-                secret_id=x_token_secret_id,
-                expected_user_id=expected_user_id,
-                project_number=project_number,
-            )
-        except XTokenStateError:
-            raise ProductionConfigurationError(
-                f"{X_TOKEN_SECRET_ID_VARIABLE} is not a valid Secret Manager secret ID"
-            ) from None
-        x_oauth_credentials = OAuthClientCredentials(
-            client_id=_required_value(source, X_OAUTH_CLIENT_ID_VARIABLE),
-            client_secret=_required_value(source, X_OAUTH_CLIENT_SECRET_VARIABLE),
-        )
-
+        x_cloud = XCloudRuntimeConfig.from_environment(source)
         return cls(
             gcp_project_id=project_id,
-            gcp_project_number=project_number,
-            firestore_database_id=database_id,
+            gcp_project_number=x_cloud.gcp_project_number,
+            firestore_database_id=x_cloud.firestore_database_id,
             deadline_tasks=deadline_tasks,
             preflight_tasks=preflight_tasks,
-            x_token_secret_id=x_token_secret_id,
-            x_posting=x_posting,
-            x_oauth_credentials=x_oauth_credentials,
+            x_token_secret_id=x_cloud.x_token_secret_id,
+            x_posting=x_cloud.x_posting,
+            x_oauth_credentials=x_cloud.x_oauth_credentials,
         )
 
 
@@ -306,22 +262,11 @@ def _default_secret_manager_client() -> SecretManagerClient:
 
 
 def _required_value(source: Mapping[str, str], name: str) -> str:
-    value = source.get(name)
-    if value is None or not isinstance(value, str) or not value or value != value.strip():
-        raise ProductionConfigurationError(f"{name} is required and must be non-empty")
-    if not value.isprintable():
-        raise ProductionConfigurationError(f"{name} must contain only printable characters")
-    return value
+    return required_runtime_value(source, name)
 
 
 def _optional_value(value: str | None, name: str) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str) or value != value.strip() or not value.isprintable():
-        raise ProductionConfigurationError(
-            f"{name} must be printable and contain no outer whitespace"
-        )
-    return value or None
+    return optional_runtime_value(value, name)
 
 
 def _validated_base_url(value: str) -> str:
