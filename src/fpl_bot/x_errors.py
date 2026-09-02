@@ -113,3 +113,7 @@ class XTokenAuthorityUnconfirmedError(XTokenStoreError):
     def __init__(self, candidate_version_name: str) -> None:
         super().__init__("OAuth token authority transition could not be confirmed")
         self.candidate_version_name = candidate_version_name
+
+
+class XTokenBootstrapReconciliationError(XTokenStoreError):
+    """Raised when initial token state is not safely empty or authoritative."""

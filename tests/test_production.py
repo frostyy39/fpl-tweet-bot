@@ -28,6 +28,7 @@ from fpl_bot.production import (
     CLOUD_TASKS_QUEUE_ID_VARIABLE,
     FIRESTORE_DATABASE_ID_VARIABLE,
     GCP_PROJECT_ID_VARIABLE,
+    GCP_PROJECT_NUMBER_VARIABLE,
     X_TOKEN_SECRET_ID_VARIABLE,
     ProductionConfigurationError,
     ProductionRuntimeConfig,
@@ -55,6 +56,7 @@ def valid_environment() -> dict[str, str]:
         X_OAUTH_CLIENT_SECRET_VARIABLE: "unit-test-client-secret-placeholder",
         X_TOKEN_SECRET_ID_VARIABLE: "unit-test-x-token-state",
         GCP_PROJECT_ID_VARIABLE: "fpl-bot-test",
+        GCP_PROJECT_NUMBER_VARIABLE: "123456789012",
         FIRESTORE_DATABASE_ID_VARIABLE: "(default)",
         CLOUD_TASKS_LOCATION_ID_VARIABLE: "europe-west2",
         CLOUD_TASKS_QUEUE_ID_VARIABLE: "deadline-posts",
@@ -312,6 +314,7 @@ def test_production_factory_constructs_cloud_token_store_without_reading_it(
     "variable",
     [
         GCP_PROJECT_ID_VARIABLE,
+        GCP_PROJECT_NUMBER_VARIABLE,
         CLOUD_TASKS_LOCATION_ID_VARIABLE,
         CLOUD_TASKS_QUEUE_ID_VARIABLE,
         CLOUD_RUN_BASE_URL_VARIABLE,
@@ -342,6 +345,14 @@ def test_invalid_cloud_resource_configuration_fails_closed(variable: str, value:
     environ[variable] = value
 
     with pytest.raises(CloudTaskValidationError):
+        ProductionRuntimeConfig.from_environment(environ)
+
+
+def test_invalid_project_number_fails_closed() -> None:
+    environ = valid_environment()
+    environ[GCP_PROJECT_NUMBER_VARIABLE] = "not-a-number"
+
+    with pytest.raises(ProductionConfigurationError, match=GCP_PROJECT_NUMBER_VARIABLE):
         ProductionRuntimeConfig.from_environment(environ)
 
 

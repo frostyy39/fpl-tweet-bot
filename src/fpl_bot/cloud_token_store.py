@@ -2,15 +2,18 @@
 
 import json
 import re
+import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import Any, Protocol
 
 from fpl_bot.firestore_state import FirestoreClient, TransactionalWrapper
 from fpl_bot.x_errors import (
     XTokenAuthorityPersistenceError,
     XTokenAuthorityUnconfirmedError,
+    XTokenBootstrapReconciliationError,
     XTokenSecretStorageError,
     XTokenStateError,
     XTokenStoreError,
@@ -30,6 +33,7 @@ PROJECT_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,127}\Z")
 SECRET_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,255}\Z")
 COLLECTION_ID_PATTERN = re.compile(r"[^/]{1,1500}\Z")
 USER_ID_PATTERN = re.compile(r"[1-9][0-9]*\Z")
+PROJECT_NUMBER_PATTERN = USER_ID_PATTERN
 
 
 class _Snapshot(Protocol):
@@ -47,6 +51,8 @@ class _CollectionReference(Protocol):
 
 
 class _Transaction(Protocol):
+    def create(self, reference: _DocumentReference, data: Mapping[str, Any]) -> None: ...
+
     def update(self, reference: _DocumentReference, fields: Mapping[str, Any]) -> None: ...
 
 
@@ -57,6 +63,8 @@ class SecretManagerClient(Protocol):
 
     def disable_secret_version(self, request: Mapping[str, Any]) -> Any: ...
 
+    def list_secret_versions(self, request: Mapping[str, Any]) -> Any: ...
+
 
 @dataclass(frozen=True, slots=True)
 class CloudXTokenStateStoreConfig:
@@ -65,6 +73,7 @@ class CloudXTokenStateStoreConfig:
     project_id: str
     secret_id: str
     expected_user_id: str
+    project_number: str | None = None
     metadata_collection: str = DEFAULT_TOKEN_METADATA_COLLECTION
     lease_duration: timedelta = DEFAULT_REFRESH_LEASE_DURATION
 
@@ -72,6 +81,8 @@ class CloudXTokenStateStoreConfig:
         _require_pattern(self.project_id, PROJECT_ID_PATTERN, "GCP project ID")
         _require_pattern(self.secret_id, SECRET_ID_PATTERN, "X token secret ID")
         _require_pattern(self.expected_user_id, USER_ID_PATTERN, "expected X user ID")
+        if self.project_number is not None:
+            _require_pattern(self.project_number, PROJECT_NUMBER_PATTERN, "GCP project number")
         _require_pattern(
             self.metadata_collection,
             COLLECTION_ID_PATTERN,
@@ -100,6 +111,19 @@ class CloudXTokenStateStoreConfig:
             )
         return value
 
+    def canonicalize_api_version_name(self, value: Any) -> str:
+        pattern = re.compile(
+            rf"projects/(?P<project>[A-Za-z0-9.-]+)/secrets/"
+            rf"{re.escape(self.secret_id)}/versions/(?P<version>[1-9][0-9]*)\Z"
+        )
+        match = pattern.fullmatch(value) if isinstance(value, str) else None
+        expected_projects = {self.project_id}
+        if self.project_number is not None:
+            expected_projects.add(self.project_number)
+        if match is None or match.group("project") not in expected_projects:
+            raise XTokenStateError("Secret Manager returned an invalid token version name")
+        return f"{self.secret_name}/versions/{match.group('version')}"
+
 
 @dataclass(frozen=True, slots=True)
 class _TokenAuthorityMetadata:
@@ -109,6 +133,18 @@ class _TokenAuthorityMetadata:
     updated_at_utc: datetime
     refresh_lease_owner: str | None
     refresh_lease_expires_at_utc: datetime | None
+
+
+class InitialTokenStateStatus(StrEnum):
+    INITIALIZED = "initialized"
+    ALREADY_INITIALIZED = "already_initialized"
+
+
+@dataclass(frozen=True, slots=True)
+class InitialTokenStateResult:
+    status: InitialTokenStateStatus
+    revision: str
+    secret_version_name: str
 
 
 class GoogleCloudXTokenStateStore:
@@ -138,6 +174,59 @@ class GoogleCloudXTokenStateStore:
         metadata = self._read_metadata()
         state = self._access_explicit_version(metadata.secret_version_name)
         return VersionedXTokenState(str(metadata.revision), state)
+
+    def initialize(self, initial_state: XOAuthTokenState) -> InitialTokenStateResult:
+        """Create the first secret generation and authority document exactly once."""
+
+        if not isinstance(initial_state, XOAuthTokenState):
+            raise XTokenStateError("Initial OAuth token state is invalid")
+        existing = self._authority_snapshot()
+        if existing.exists:
+            metadata = _parse_metadata(existing.to_dict(), self._config)
+            self._access_explicit_version(metadata.secret_version_name)
+            return InitialTokenStateResult(
+                InitialTokenStateStatus.ALREADY_INITIALIZED,
+                str(metadata.revision),
+                metadata.secret_version_name,
+            )
+        existing_versions = self._existing_secret_version_names()
+        candidate_version = (
+            self._matching_initial_candidate(initial_state, existing_versions)
+            if existing_versions
+            else self._add_initial_secret_version(initial_state)
+        )
+        updated_at_utc = self._clock()
+        _require_utc(updated_at_utc, "OAuth token authority initialization time")
+        document = {
+            "schema_version": TOKEN_METADATA_SCHEMA_VERSION,
+            "revision": 1,
+            "secret_version_name": candidate_version,
+            "previous_secret_version_name": None,
+            "updated_at_utc": updated_at_utc,
+            "refresh_lease_owner": None,
+            "refresh_lease_expires_at_utc": None,
+        }
+
+        def operation(transaction: _Transaction) -> bool:
+            snapshot = self._reference.get(transaction=transaction)
+            if snapshot.exists:
+                return False
+            transaction.create(self._reference, document)
+            return True
+
+        try:
+            initialized = self._transactional(operation)(self._firestore_client.transaction())
+        except Exception:
+            return self._reconcile_initialization(candidate_version)
+        if not isinstance(initialized, bool):
+            raise XTokenAuthorityUnconfirmedError(candidate_version)
+        if not initialized:
+            return self._reconcile_initialization(candidate_version)
+        return InitialTokenStateResult(
+            InitialTokenStateStatus.INITIALIZED,
+            "1",
+            candidate_version,
+        )
 
     def acquire_refresh_lease(
         self,
@@ -315,13 +404,87 @@ class GoogleCloudXTokenStateStore:
         raise XTokenAuthorityPersistenceError(candidate_version)
 
     def _read_metadata(self) -> _TokenAuthorityMetadata:
-        try:
-            snapshot = self._reference.get()
-        except Exception:
-            raise XTokenStoreError("OAuth token authority metadata could not be read") from None
+        snapshot = self._authority_snapshot()
         if not snapshot.exists:
             raise XTokenStateError("OAuth token authority metadata is not initialized")
         return _parse_metadata(snapshot.to_dict(), self._config)
+
+    def _authority_snapshot(self) -> _Snapshot:
+        try:
+            return self._reference.get()
+        except Exception:
+            raise XTokenStoreError("OAuth token authority metadata could not be read") from None
+
+    def _existing_secret_version_names(self) -> tuple[str, ...]:
+        try:
+            versions = self._secrets.list_secret_versions(
+                request={"parent": self._config.secret_name}
+            )
+            names = tuple(
+                self._config.canonicalize_api_version_name(getattr(item, "name", None))
+                for item in versions
+            )
+        except XTokenStateError:
+            raise
+        except Exception:
+            raise XTokenStoreError("OAuth token secret versions could not be listed") from None
+        return names
+
+    def _add_initial_secret_version(self, initial_state: XOAuthTokenState) -> str:
+        try:
+            return self._add_secret_version(initial_state)
+        except XTokenSecretStorageError:
+            versions = self._existing_secret_version_names()
+            if not versions:
+                raise
+            return self._matching_initial_candidate(initial_state, versions)
+
+    def _matching_initial_candidate(
+        self,
+        initial_state: XOAuthTokenState,
+        versions: tuple[str, ...],
+    ) -> str:
+        if len(versions) != 1:
+            raise XTokenBootstrapReconciliationError(
+                "OAuth token bootstrap could not identify one candidate secret version"
+            )
+        candidate = versions[0]
+        try:
+            stored = self._access_explicit_version(candidate)
+        except Exception:
+            raise XTokenBootstrapReconciliationError(
+                "OAuth token bootstrap candidate could not be verified"
+            ) from None
+        if not secrets.compare_digest(
+            serialize_token_state(stored),
+            serialize_token_state(initial_state),
+        ):
+            raise XTokenBootstrapReconciliationError(
+                "OAuth token bootstrap candidate does not match validated local state"
+            )
+        return candidate
+
+    def _reconcile_initialization(self, candidate_version: str) -> InitialTokenStateResult:
+        try:
+            snapshot = self._authority_snapshot()
+        except XTokenStoreError:
+            raise XTokenAuthorityUnconfirmedError(candidate_version) from None
+        if not snapshot.exists:
+            raise XTokenAuthorityPersistenceError(candidate_version)
+        metadata = _parse_metadata(snapshot.to_dict(), self._config)
+        if (
+            metadata.revision == 1
+            and metadata.secret_version_name == candidate_version
+            and metadata.previous_secret_version_name is None
+            and metadata.refresh_lease_owner is None
+            and metadata.refresh_lease_expires_at_utc is None
+        ):
+            return InitialTokenStateResult(
+                InitialTokenStateStatus.INITIALIZED,
+                "1",
+                candidate_version,
+            )
+        raise XTokenAuthorityPersistenceError(candidate_version)
 
     def _metadata_in_transaction(self, transaction: _Transaction) -> _TokenAuthorityMetadata:
         snapshot = self._reference.get(transaction=transaction)
@@ -333,7 +496,9 @@ class GoogleCloudXTokenStateStore:
         self._config.validate_version_name(version_name)
         try:
             response = self._secrets.access_secret_version(request={"name": version_name})
-            response_name = getattr(response, "name", None)
+            response_name = self._config.canonicalize_api_version_name(
+                getattr(response, "name", None)
+            )
             payload = getattr(getattr(response, "payload", None), "data", None)
         except Exception:
             raise XTokenStoreError(
@@ -349,7 +514,9 @@ class GoogleCloudXTokenStateStore:
             response = self._secrets.add_secret_version(
                 request={"parent": self._config.secret_name, "payload": {"data": payload}}
             )
-            version_name = self._config.validate_version_name(getattr(response, "name", None))
+            version_name = self._config.canonicalize_api_version_name(
+                getattr(response, "name", None)
+            )
         except XTokenStateError:
             raise
         except Exception:

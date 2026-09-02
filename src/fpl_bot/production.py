@@ -52,6 +52,7 @@ from fpl_bot.x_token_refresh import (
 )
 
 GCP_PROJECT_ID_VARIABLE = "GCP_PROJECT_ID"
+GCP_PROJECT_NUMBER_VARIABLE = "GCP_PROJECT_NUMBER"
 FIRESTORE_DATABASE_ID_VARIABLE = "FIRESTORE_DATABASE_ID"
 CLOUD_TASKS_LOCATION_ID_VARIABLE = "CLOUD_TASKS_LOCATION_ID"
 CLOUD_TASKS_QUEUE_ID_VARIABLE = "CLOUD_TASKS_QUEUE_ID"
@@ -73,6 +74,7 @@ class ProductionRuntimeConfig:
     """Validated non-secret infrastructure settings plus redacted X configuration."""
 
     gcp_project_id: str
+    gcp_project_number: str
     firestore_database_id: str
     deadline_tasks: CloudTasksConfig
     preflight_tasks: CloudTasksConfig
@@ -87,6 +89,15 @@ class ProductionRuntimeConfig:
     ) -> "ProductionRuntimeConfig":
         source = os.environ if environ is None else environ
         project_id = _required_value(source, GCP_PROJECT_ID_VARIABLE)
+        project_number = _required_value(source, GCP_PROJECT_NUMBER_VARIABLE)
+        if (
+            not project_number.isascii()
+            or not project_number.isdigit()
+            or project_number.startswith("0")
+        ):
+            raise ProductionConfigurationError(
+                f"{GCP_PROJECT_NUMBER_VARIABLE} must be a positive numeric project number"
+            )
         location_id = _required_value(source, CLOUD_TASKS_LOCATION_ID_VARIABLE)
         queue_id = _required_value(source, CLOUD_TASKS_QUEUE_ID_VARIABLE)
         base_url = _validated_base_url(_required_value(source, CLOUD_RUN_BASE_URL_VARIABLE))
@@ -134,6 +145,7 @@ class ProductionRuntimeConfig:
                 project_id=project_id,
                 secret_id=x_token_secret_id,
                 expected_user_id=expected_user_id,
+                project_number=project_number,
             )
         except XTokenStateError:
             raise ProductionConfigurationError(
@@ -146,6 +158,7 @@ class ProductionRuntimeConfig:
 
         return cls(
             gcp_project_id=project_id,
+            gcp_project_number=project_number,
             firestore_database_id=database_id,
             deadline_tasks=deadline_tasks,
             preflight_tasks=preflight_tasks,
@@ -192,6 +205,7 @@ def create_production_app(
                 project_id=config.gcp_project_id,
                 secret_id=config.x_token_secret_id,
                 expected_user_id=expected_user_id,
+                project_number=config.gcp_project_number,
             ),
             firestore_client=firestore,
             secret_manager_client=(

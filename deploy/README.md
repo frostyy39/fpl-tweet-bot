@@ -203,7 +203,7 @@ gcloud run deploy $Service --project=$ProjectId --region=$Region --platform=mana
   --image=$ImageDigest --service-account=$RuntimeEmail --no-allow-unauthenticated `
   --min-instances=0 --max-instances=2 --concurrency=2 --cpu=1 --memory=512Mi `
   --port=8080 --ingress=all `
-  --set-env-vars="GCP_PROJECT_ID=$ProjectId,FIRESTORE_DATABASE_ID=(default),CLOUD_TASKS_LOCATION_ID=$Region,CLOUD_TASKS_QUEUE_ID=$Queue,CLOUD_RUN_BASE_URL=$SentinelOrigin,CLOUD_TASKS_CALLER_SERVICE_ACCOUNT_EMAIL=$InvokerEmail,CLOUD_TASKS_OIDC_AUDIENCE=$SentinelOrigin,X_ENVIRONMENT=test,X_POSTING_ENABLED=false,X_EXPECTED_USER_ID=$ExpectedXUserId,X_TOKEN_SECRET_ID=$TokenSecret" `
+  --set-env-vars="GCP_PROJECT_ID=$ProjectId,GCP_PROJECT_NUMBER=$ProjectNumber,FIRESTORE_DATABASE_ID=(default),CLOUD_TASKS_LOCATION_ID=$Region,CLOUD_TASKS_QUEUE_ID=$Queue,CLOUD_RUN_BASE_URL=$SentinelOrigin,CLOUD_TASKS_CALLER_SERVICE_ACCOUNT_EMAIL=$InvokerEmail,CLOUD_TASKS_OIDC_AUDIENCE=$SentinelOrigin,X_ENVIRONMENT=test,X_POSTING_ENABLED=false,X_EXPECTED_USER_ID=$ExpectedXUserId,X_TOKEN_SECRET_ID=$TokenSecret" `
   --set-secrets="X_OAUTH_CLIENT_ID=${StaticClientIdSecret}:1,X_OAUTH_CLIENT_SECRET=${StaticClientSecretSecret}:1"
 ```
 
@@ -266,12 +266,49 @@ zero mutable token-secret versions, one enabled version on each static OAuth cli
 user-managed service-account keys, one scale-to-zero private Cloud Run service, and no Scheduler
 job. `X_POSTING_ENABLED=false`; no OAuth refresh, X identity request, or X Post has occurred.
 
-## Later bootstrap and teardown
+## One-time test-account token bootstrap
 
-Bootstrap the approved test-account OAuth state only in a separately reviewed milestone; never
-place token state or OAuth client secrets in tracked files or the image. Keep posting disabled
-until that bootstrap, identity verification, and an explicit posting-enablement review are
-complete.
+Keep `X_POSTING_ENABLED=false` throughout this operation. The approved source is the complete
+`x_test_oauth_tokens.dpapi` handoff created by the local OAuth helper and stored outside the
+repository. Never paste access or refresh tokens into a command, environment variable, tracked
+file, log, or terminal output.
+
+From a clean reviewed checkout, first confirm that the configured mutable secret has zero versions
+and the Firestore authority document is absent. Then run the dedicated create-only utility with the
+external encrypted file path:
+
+```powershell
+$TokenHandoff = "<absolute-path-outside-repository-to-x_test_oauth_tokens.dpapi>"
+
+fpl-bot-x-bootstrap `
+  --project-id=$ProjectId `
+  --project-number=$ProjectNumber `
+  --database-id="(default)" `
+  --secret-id=$TokenSecret `
+  --expected-user-id=$ExpectedXUserId `
+  --token-file=$TokenHandoff
+```
+
+The utility decrypts the handoff only in the current Windows user's process, validates the exact
+local schema, expected user ID, bearer type, timezone-aware UTC expiry, refresh token, and required
+V1 scopes, then serializes through the production cloud-token-store contract. It creates one
+explicit Secret Manager version before transactionally creating revision `1` of
+`x_oauth_token_authority/x-user-{X_EXPECTED_USER_ID}`. Firestore receives only schema, revision,
+explicit version name, UTC update time, and empty lease fields—never OAuth token values.
+
+The command verifies the new state through `GoogleCloudXTokenStateStore.read()` and reports only
+non-secret metadata. An expired access token is permitted when the refresh state is otherwise
+valid; bootstrap deliberately performs no refresh and no X request. If authority already exists,
+the command performs no mutation. If a candidate secret version exists without authority, it fails
+for explicit reconciliation rather than uploading a duplicate. Rerunning bootstrap is not the
+normal rotation mechanism; future runtime refresh uses the distributed lease/CAS flow.
+
+Afterward, verify that the authority points to the exact numeric enabled version, its initial
+revision is `1`, no lease is active, the queue remains empty, Scheduler remains absent, and Cloud
+Run still has `X_POSTING_ENABLED=false`. Controlled refresh and identity verification are separate
+later reviews.
+
+## Teardown
 
 For teardown, first disable any Scheduler job, then remove the Cloud Run service, queue, image
 repository, token secret, Firestore database, service accounts, and finally billing/project only
