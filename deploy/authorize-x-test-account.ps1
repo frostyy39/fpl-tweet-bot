@@ -16,43 +16,33 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-
-$clientIdPath = [IO.Path]::GetFullPath($ClientIdPath)
-$secretPath = [IO.Path]::GetFullPath($EncryptedClientSecretPath)
-$tokenPath = [IO.Path]::GetFullPath($TokenOutputPath)
-if ([IO.File]::Exists($tokenPath)) {
-    throw "The new token-output file already exists; the prior handoff was not changed."
+if ($Host.Name -eq "ConsoleHost") {
+    $Host.UI.RawUI.WindowTitle = "FPL Bot - Test Account Authorization"
 }
 
-$clientId = [IO.File]::ReadAllText($clientIdPath).Trim()
-if ([string]::IsNullOrWhiteSpace($clientId)) {
-    throw "The OAuth 2.0 Client ID file is empty."
+$repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+$python = Join-Path $repositoryRoot ".venv\Scripts\python.exe"
+if (-not [IO.File]::Exists($python)) {
+    throw "The repository Python environment is unavailable; authorization was not started."
 }
-$encryptedSecret = [IO.File]::ReadAllText($secretPath).Trim()
-if ([string]::IsNullOrWhiteSpace($encryptedSecret)) {
-    throw "The encrypted OAuth 2.0 Client Secret file is empty."
-}
-
-$secureSecret = ConvertTo-SecureString -String $encryptedSecret
-$secretPointer = [IntPtr]::Zero
+$priorPythonPath = $env:PYTHONPATH
 try {
-    $secretPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureSecret)
-    $env:X_OAUTH_CLIENT_ID = $clientId
-    $env:X_OAUTH_CLIENT_SECRET = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($secretPointer)
-    $env:X_OAUTH_TOKEN_OUTPUT_FILE = $tokenPath
-    $env:X_EXPECTED_USER_ID = $ExpectedUserId
-    & fpl-bot-x-authorize
+    $env:PYTHONPATH = Join-Path $repositoryRoot "src"
+    & $python -m fpl_bot.x_reauthorization_cli `
+        --client-id-path ([IO.Path]::GetFullPath($ClientIdPath)) `
+        --encrypted-client-secret-path ([IO.Path]::GetFullPath($EncryptedClientSecretPath)) `
+        --expected-user-id $ExpectedUserId `
+        --token-output-path ([IO.Path]::GetFullPath($TokenOutputPath)) `
+        --repository-root $repositoryRoot
     if ($LASTEXITCODE -ne 0) {
         throw "The no-post test-account authorization did not complete successfully."
     }
 }
 finally {
-    Remove-Item Env:X_OAUTH_CLIENT_ID -ErrorAction SilentlyContinue
-    Remove-Item Env:X_OAUTH_CLIENT_SECRET -ErrorAction SilentlyContinue
-    Remove-Item Env:X_OAUTH_TOKEN_OUTPUT_FILE -ErrorAction SilentlyContinue
-    Remove-Item Env:X_EXPECTED_USER_ID -ErrorAction SilentlyContinue
-    if ($secretPointer -ne [IntPtr]::Zero) {
-        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($secretPointer)
+    if ($null -eq $priorPythonPath) {
+        Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
     }
-    $secureSecret.Dispose()
+    else {
+        $env:PYTHONPATH = $priorPythonPath
+    }
 }

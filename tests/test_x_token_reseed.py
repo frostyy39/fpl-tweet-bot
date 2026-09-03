@@ -210,15 +210,14 @@ def test_secure_capture_and_authorization_scripts_preserve_secret_boundaries() -
     capture = Path("deploy/capture-x-oauth-client-secret.ps1").read_text(encoding="utf-8")
     authorize = Path("deploy/authorize-x-test-account.ps1").read_text(encoding="utf-8")
 
-    assert "Read-Host" in capture and "-AsSecureString" in capture
-    assert "ConvertFrom-SecureString" in capture
-    assert "ConvertTo-SecureString" in capture
-    assert "File]::Replace" in capture
-    assert ".backup-" in capture
+    assert "x_client_secret_capture" in capture
+    assert "--output-path" in capture
+    assert "ConvertFrom-SecureString" not in capture
+    assert "Read-Host" not in capture
     assert "ClientSecret" not in capture.split("param(", 1)[1].split(")", 1)[0]
-    assert "ConvertTo-SecureString" in authorize
-    assert "$env:X_OAUTH_CLIENT_SECRET" in authorize
-    assert "Remove-Item Env:X_OAUTH_CLIENT_SECRET" in authorize
-    assert "$env:X_EXPECTED_USER_ID" in authorize
-    assert "fpl-bot-x-authorize" in authorize
+    assert "x_reauthorization_cli" in authorize
+    assert "--encrypted-client-secret-path" in authorize
+    assert "ConvertTo-SecureString" not in authorize
+    assert "$env:X_OAUTH_CLIENT_SECRET" not in authorize
+    assert "--expected-user-id" in authorize
     assert "POST /2/tweets" not in capture + authorize
