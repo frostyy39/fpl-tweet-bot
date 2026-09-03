@@ -310,6 +310,34 @@ class GoogleCloudXTokenStateStore:
             lease=None,
         )
 
+    def reseed_if_revision(
+        self,
+        expected_revision: str,
+        replacement: XOAuthTokenState,
+    ) -> bool:
+        """CAS one reviewed admin generation, reconciling a unique orphan first."""
+
+        revision = _parse_revision(expected_revision)
+        if not isinstance(replacement, XOAuthTokenState):
+            raise XTokenStateError("Replacement OAuth token state is invalid")
+        before = self._read_metadata()
+        if before.revision != revision or before.refresh_lease_owner is not None:
+            return False
+        candidate = self._matching_reseed_candidate(replacement, before)
+        if candidate is None:
+            try:
+                candidate = self._add_secret_version(replacement)
+            except XTokenSecretStorageError:
+                candidate = self._matching_reseed_candidate(replacement, before)
+                if candidate is None:
+                    raise
+        return self._persist_and_transition(
+            expected_revision=revision,
+            replacement=replacement,
+            lease=None,
+            candidate_version=candidate,
+        )
+
     def replace_if_revision_with_lease(
         self,
         lease: XTokenRefreshLease,
@@ -328,6 +356,7 @@ class GoogleCloudXTokenStateStore:
         expected_revision: int,
         replacement: XOAuthTokenState,
         lease: XTokenRefreshLease | None,
+        candidate_version: str | None = None,
     ) -> bool:
         if not isinstance(replacement, XOAuthTokenState):
             raise XTokenStateError("Replacement OAuth token state is invalid")
@@ -339,7 +368,10 @@ class GoogleCloudXTokenStateStore:
         if lease is not None and before.refresh_lease_owner != lease.owner_id:
             return False
 
-        candidate_version = self._add_secret_version(replacement)
+        if candidate_version is None:
+            candidate_version = self._add_secret_version(replacement)
+        else:
+            self._config.validate_version_name(candidate_version)
         updated_at_utc = self._clock()
         _require_utc(updated_at_utc, "OAuth token authority update time")
 
@@ -380,6 +412,16 @@ class GoogleCloudXTokenStateStore:
         if not isinstance(replaced, bool):
             raise XTokenStoreError("OAuth token authority transaction returned an invalid result")
         if not replaced:
+            try:
+                current = self._read_metadata()
+            except Exception:
+                raise XTokenAuthorityUnconfirmedError(candidate_version) from None
+            if (
+                current.revision == expected_revision + 1
+                and current.secret_version_name == candidate_version
+            ):
+                self._disable_best_effort(before.previous_secret_version_name)
+                return True
             self._disable_best_effort(candidate_version)
             return False
         self._disable_best_effort(before.previous_secret_version_name)
@@ -463,6 +505,44 @@ class GoogleCloudXTokenStateStore:
                 "OAuth token bootstrap candidate does not match validated local state"
             )
         return candidate
+
+    def _matching_reseed_candidate(
+        self,
+        replacement: XOAuthTokenState,
+        authority: _TokenAuthorityMetadata,
+    ) -> str | None:
+        try:
+            versions = self._secrets.list_secret_versions(
+                request={"parent": self._config.secret_name}
+            )
+            candidates: list[str] = []
+            excluded = {
+                authority.secret_version_name,
+                authority.previous_secret_version_name,
+            }
+            for item in versions:
+                if not _secret_version_is_enabled(item):
+                    continue
+                name = self._config.canonicalize_api_version_name(getattr(item, "name", None))
+                if name in excluded:
+                    continue
+                stored = self._access_explicit_version(name)
+                if secrets.compare_digest(
+                    serialize_token_state(stored),
+                    serialize_token_state(replacement),
+                ):
+                    candidates.append(name)
+        except XTokenStateError:
+            raise
+        except Exception:
+            raise XTokenStoreError(
+                "OAuth token reseed candidates could not be reconciled"
+            ) from None
+        if len(candidates) > 1:
+            raise XTokenStoreError(
+                "OAuth token reseed found multiple matching candidate generations"
+            )
+        return candidates[0] if candidates else None
 
     def _reconcile_initialization(self, candidate_version: str) -> InitialTokenStateResult:
         try:
@@ -627,6 +707,16 @@ def _parse_metadata(
         refresh_lease_owner=lease_owner,
         refresh_lease_expires_at_utc=lease_expiry,
     )
+
+
+def _secret_version_is_enabled(value: Any) -> bool:
+    state = getattr(value, "state", None)
+    if state is None:
+        return True
+    name = getattr(state, "name", None)
+    if isinstance(name, str):
+        return name == "ENABLED"
+    return state == 1
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

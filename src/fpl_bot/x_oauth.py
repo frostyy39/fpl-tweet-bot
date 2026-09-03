@@ -22,8 +22,13 @@ from fpl_bot.x_api import (
     XHttpResponse,
     XHttpTransport,
 )
-from fpl_bot.x_config import XPostingConfig
+from fpl_bot.x_config import (
+    X_EXPECTED_USER_ID_VARIABLE,
+    X_ID_PATTERN,
+    XPostingConfig,
+)
 from fpl_bot.x_errors import (
+    XIdentityMismatchError,
     XOAuthCallbackError,
     XOAuthConfigurationError,
     XOAuthHandoffError,
@@ -57,6 +62,7 @@ class OAuthClientCredentials:
 class LocalOAuthConfig:
     credentials: OAuthClientCredentials = field(repr=False)
     token_output_file: Path = field(repr=False)
+    expected_user_id: str | None = None
 
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] | None = None) -> "LocalOAuthConfig":
@@ -64,6 +70,13 @@ class LocalOAuthConfig:
         client_id = _required_environment_value(source, X_OAUTH_CLIENT_ID_VARIABLE)
         client_secret = _required_environment_value(source, X_OAUTH_CLIENT_SECRET_VARIABLE)
         output_value = _required_environment_value(source, X_OAUTH_TOKEN_OUTPUT_FILE_VARIABLE)
+        expected_user_id = source.get(X_EXPECTED_USER_ID_VARIABLE)
+        if expected_user_id is not None:
+            expected_user_id = expected_user_id.strip()
+            if not X_ID_PATTERN.fullmatch(expected_user_id):
+                raise XOAuthConfigurationError(
+                    f"{X_EXPECTED_USER_ID_VARIABLE} must be a positive numeric X user ID"
+                )
         output_file = Path(output_value)
         if not output_file.is_absolute():
             raise XOAuthConfigurationError(
@@ -73,6 +86,7 @@ class LocalOAuthConfig:
         return cls(
             credentials=OAuthClientCredentials(client_id=client_id, client_secret=client_secret),
             token_output_file=output_file,
+            expected_user_id=expected_user_id,
         )
 
 
@@ -341,6 +355,10 @@ def authorize_test_account(
         transport=identity_transport,
     )
     user = identity_client.get_authenticated_user()
+    if config.expected_user_id is not None and user.user_id != config.expected_user_id:
+        raise XIdentityMismatchError(
+            "Authenticated X identity does not match the expected reauthorization account"
+        )
     handoff.store(tokens, user)
     return user
 

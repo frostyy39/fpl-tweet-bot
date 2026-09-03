@@ -346,6 +346,81 @@ version is enabled, the refresh lease is clear, `X_POSTING_ENABLED` remains fals
 empty, and Scheduler remains absent. The temporary Job may then be deleted under a separate
 approved operation. No Scheduler should ever target this Job.
 
+## OAuth 2.0 Client Secret recovery and test-account reauthorization
+
+Use this procedure only after a reviewed decision to replace an unknown or compromised OAuth 2.0
+Client Secret. X documents that [regenerated credentials invalidate the old
+credentials](https://docs.x.com/x-api/getting-started/getting-access), and that a
+[confidential Automated App/Bot receives a Client
+Secret](https://docs.x.com/fundamentals/developer-apps) for token-endpoint Basic authentication.
+The current X documentation does not explicitly guarantee that the Client ID remains unchanged
+when only its Client Secret is regenerated. Record the Client ID shown for the existing app and
+stop if it differs from the retained local Client ID; do not regenerate the Client ID, API
+Key/Secret, Bearer Token, or OAuth 1.0a tokens as part of this procedure.
+
+Before opening the X Developer Console, prepare a hidden prompt in PowerShell. Pass only the
+external encrypted-file path—never the secret itself:
+
+```powershell
+.\deploy\capture-x-oauth-client-secret.ps1 `
+  -OutputPath "<absolute-external-path-to-x_client_secret.encrypted>"
+```
+
+Leave that prompt open. In the existing app's **Keys and Tokens** page, regenerate only the OAuth
+2.0 Client Secret, then paste its one-time displayed value into the hidden prompt. The script uses
+current-user DPAPI, validates a decrypt round trip without printing plaintext, writes a candidate
+file first, and atomically replaces the configured file while retaining an encrypted timestamped
+backup. The previous encrypted secret is not changed unless the new value was captured and
+validated successfully.
+
+Authorize the known test account into a new, non-existing DPAPI handoff path. Keep the previous
+handoff unchanged until the new one has passed all checks:
+
+```powershell
+.\deploy\authorize-x-test-account.ps1 `
+  -ClientIdPath "<absolute-external-path-to-x_client_id.txt>" `
+  -EncryptedClientSecretPath "<absolute-external-path-to-x_client_secret.encrypted>" `
+  -ExpectedUserId $ExpectedXUserId `
+  -TokenOutputPath "<new-absolute-external-path-to-x_test_oauth_tokens.dpapi>"
+```
+
+The existing Authorization Code + PKCE helper binds only to its exact loopback callback, validates
+state, requests `tweet.read`, `users.read`, `tweet.write`, and `offline.access`, exchanges the code
+as a confidential client, and performs only `/2/users/me`. It writes the new DPAPI handoff only if
+the returned immutable numeric user ID equals the expected test account. It never Posts. Ensure the
+browser session is signed into the intended test account before approving the authorization.
+
+Under a later, separately reviewed cloud mutation, add the captured static Client Secret as a new
+explicit version of the existing static secret. Then reseed the already-initialized mutable token
+authority from the new DPAPI handoff using its exact current revision:
+
+```powershell
+fpl-bot-x-reseed `
+  --project-id=$ProjectId `
+  --project-number=$ProjectNumber `
+  --database-id="(default)" `
+  --secret-id=$TokenSecret `
+  --expected-user-id=$ExpectedXUserId `
+  --expected-revision="<read-and-reviewed-current-authority-revision>" `
+  --token-file="<new-absolute-external-DPAPI-handoff-path>"
+```
+
+The reseed command has no refresh, identity, or posting capability. It validates the DPAPI handoff
+through the existing strict bootstrap parser, creates one new explicit Secret Manager token
+generation through `GoogleCloudXTokenStateStore`, and transactionally compares and swaps only the
+expected Firestore revision. The previous token generation remains the immediate recovery
+generation. Stale or active-lease state fails closed. An uncertain Firestore result is accepted
+only when the cloud store rereads the exact candidate as authoritative; tokens never enter
+Firestore. A rerun whose exact token state is already authoritative performs no replacement and
+therefore cannot create another generation.
+
+Finally update both the private service and the one-shot verifier Job to the new explicit static
+Client Secret version, leave `X_POSTING_ENABLED=false`, and execute the no-post verifier once with
+task count `1`, parallelism `1`, and retries `0`. Keep the old static and mutable generations until
+the new authority and expected identity have been verified. This recovery flow deliberately uses a
+fresh test-account authorization and does not assume anything about whether Client Secret rotation
+invalidates an older refresh token.
+
 ## Teardown
 
 For teardown, first disable any Scheduler job, then remove the Cloud Run service, queue, image

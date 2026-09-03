@@ -18,6 +18,7 @@ import fpl_bot.x_oauth as x_oauth_module
 from fpl_bot.windows_dpapi import CRYPTPROTECT_UI_FORBIDDEN, WindowsDpapiProtector
 from fpl_bot.x_api import AuthenticatedXUser, XHttpRequest, XHttpResponse
 from fpl_bot.x_errors import (
+    XIdentityMismatchError,
     XOAuthCallbackError,
     XOAuthConfigurationError,
     XOAuthHandoffError,
@@ -188,6 +189,25 @@ def test_local_config_requires_environment_secrets_and_absolute_handoff_path(
                 "X_OAUTH_TOKEN_OUTPUT_FILE": "tokens.json",
             }
         )
+
+
+def test_local_config_validates_optional_expected_reauthorization_identity(
+    tmp_path: Path,
+) -> None:
+    environment = {
+        "X_OAUTH_CLIENT_ID": CLIENT_ID_PLACEHOLDER,
+        "X_OAUTH_CLIENT_SECRET": CLIENT_SECRET_PLACEHOLDER,
+        "X_OAUTH_TOKEN_OUTPUT_FILE": str(tmp_path / "tokens.dpapi"),
+        "X_EXPECTED_USER_ID": "123456789",
+    }
+
+    config = LocalOAuthConfig.from_environment(environment)
+
+    assert config.expected_user_id == "123456789"
+    for invalid in ("", "0", "-1", "not-an-id"):
+        environment["X_EXPECTED_USER_ID"] = invalid
+        with pytest.raises(XOAuthConfigurationError, match="positive numeric"):
+            LocalOAuthConfig.from_environment(environment)
 
 
 def test_pkce_and_state_generation_are_deterministic_with_injected_entropy() -> None:
@@ -647,6 +667,37 @@ def test_authorization_verifies_user_without_posting_or_printing_tokens(
     )
     assert len(handoff.calls) == 1
     assert capsys.readouterr() == ("", "")
+
+
+def test_reauthorization_expected_identity_mismatch_prevents_token_handoff(
+    tmp_path: Path,
+) -> None:
+    token_transport = FakeTransport([json_response(200, token_response_payload())])
+    identity_transport = FakeTransport(
+        [json_response(200, {"data": {"id": "987654321", "username": "other_user"}})]
+    )
+    handoff = RecordingHandoff()
+    config = LocalOAuthConfig(
+        fixed_credentials(),
+        tmp_path / "unused-token-path.json",
+        expected_user_id="123456789",
+    )
+
+    with pytest.raises(XIdentityMismatchError, match="expected reauthorization account"):
+        authorize_test_account(
+            config,
+            receiver=FakeReceiver(),
+            handoff=handoff,
+            browser_open=lambda url: True,
+            token_transport=token_transport,
+            identity_transport=identity_transport,
+            entropy=deterministic_entropy,
+            now=lambda: FIXED_NOW,
+        )
+
+    assert handoff.calls == []
+    assert len(token_transport.requests) == 1
+    assert len(identity_transport.requests) == 1
 
 
 def test_invalid_authenticated_user_response_prevents_token_handoff(tmp_path: Path) -> None:

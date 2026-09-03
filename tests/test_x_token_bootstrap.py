@@ -20,6 +20,7 @@ from fpl_bot.x_errors import (
     XTokenBootstrapReconciliationError,
     XTokenSecretStorageError,
     XTokenStateError,
+    XTokenStoreError,
 )
 from fpl_bot.x_oauth import DPAPI_FILE_MAGIC, OAUTH_SCOPES
 from fpl_bot.x_token_bootstrap import (
@@ -27,6 +28,7 @@ from fpl_bot.x_token_bootstrap import (
     bootstrap_x_token_state,
 )
 from fpl_bot.x_token_refresh import XOAuthTokenState
+from fpl_bot.x_token_reseed import XTokenReseedStatus, reseed_x_token_state
 
 NOW = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
 RECEIVED = datetime(2026, 9, 1, 9, 0, tzinfo=UTC)
@@ -576,3 +578,86 @@ def test_bootstrap_dependency_graph_has_no_x_or_post_capability() -> None:
         "/2/users/me",
     )
     assert all(name not in source for name in forbidden)
+
+
+def test_reseed_cloud_store_writes_new_generation_before_authority_and_preserves_old(
+    tmp_path: Path,
+) -> None:
+    old_state = token_state()
+    existing_versions = {version_name(1): serialize_token_state(old_state)}
+    document = authority_document()
+    store, firestore, secrets = cloud_store(document=document, versions=existing_versions)
+    new_local = local_state(tmp_path)
+    original_add = secrets.add_secret_version
+
+    def add(request: Mapping[str, Any]) -> Any:
+        assert firestore.document.data == document
+        return original_add(request)
+
+    secrets.add_secret_version = add  # type: ignore[method-assign]
+
+    result = reseed_x_token_state(new_local, store, expected_revision="1")
+
+    assert result.status is XTokenReseedStatus.RESEEDED
+    assert firestore.document.data is not None
+    assert firestore.document.data["revision"] == 2
+    assert firestore.document.data["secret_version_name"] == version_name(2)
+    assert firestore.document.data["previous_secret_version_name"] == version_name(1)
+    assert firestore.document.data["refresh_lease_owner"] is None
+    assert firestore.document.data["refresh_lease_expires_at_utc"] is None
+    assert set(secrets.versions) == {version_name(1), version_name(2)}
+    rendered = json.dumps(firestore.document.data, default=str)
+    assert ACCESS_TOKEN not in rendered
+    assert REFRESH_TOKEN not in rendered
+
+
+def test_reseed_cloud_store_ambiguous_authority_commit_reconciles_without_duplicate(
+    tmp_path: Path,
+) -> None:
+    store, firestore, secrets = cloud_store(
+        document=authority_document(),
+        versions={version_name(1): serialize_token_state(token_state())},
+    )
+    firestore.fail_transaction = "after"
+    new_local = local_state(tmp_path)
+
+    result = reseed_x_token_state(new_local, store, expected_revision="1")
+
+    assert result.status is XTokenReseedStatus.RESEEDED
+    assert result.authoritative_revision == "2"
+    assert set(secrets.versions) == {version_name(1), version_name(2)}
+
+    rerun = reseed_x_token_state(new_local, store, expected_revision="1")
+    assert rerun.status is XTokenReseedStatus.ALREADY_AUTHORITATIVE
+    assert set(secrets.versions) == {version_name(1), version_name(2)}
+
+
+def test_reseed_reconciles_ambiguous_secret_write_without_duplicate_generation(
+    tmp_path: Path,
+) -> None:
+    store, _, secrets = cloud_store(
+        document=authority_document(),
+        versions={version_name(1): serialize_token_state(token_state())},
+    )
+    secrets.fail_add_after_write = True
+
+    result = reseed_x_token_state(local_state(tmp_path), store, expected_revision="1")
+
+    assert result.status is XTokenReseedStatus.RESEEDED
+    assert set(secrets.versions) == {version_name(1), version_name(2)}
+
+
+def test_reseed_active_lease_fails_before_secret_generation(tmp_path: Path) -> None:
+    document = authority_document()
+    document["refresh_lease_owner"] = "runtime-refresh-owner"
+    document["refresh_lease_expires_at_utc"] = NOW + timedelta(seconds=30)
+    store, _, secrets = cloud_store(
+        document=document,
+        versions={version_name(1): serialize_token_state(token_state())},
+    )
+
+    with pytest.raises(XTokenStoreError, match="lost its authority"):
+        reseed_x_token_state(local_state(tmp_path), store, expected_revision="1")
+
+    assert set(secrets.versions) == {version_name(1)}
+    assert "add" not in secrets.calls
