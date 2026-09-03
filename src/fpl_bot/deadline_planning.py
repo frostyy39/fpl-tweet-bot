@@ -6,7 +6,14 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 from fpl_bot.deadline_revalidation import ScheduledDeadlineInstruction
-from fpl_bot.errors import DataValidationError
+from fpl_bot.errors import (
+    DataValidationError,
+    DeadlineEventSelectionError,
+    DeadlineTimezoneError,
+    FplBootstrapValidationError,
+    MultipleSameDayEventsError,
+    NoSuitableEventError,
+)
 from fpl_bot.events import parse_events, select_next_event, to_london
 from fpl_bot.models import FplEvent
 from fpl_bot.service import FplDataSource
@@ -38,6 +45,22 @@ class DeadlinePlanningDecision:
         return self.status is DeadlinePlanningStatus.ELIGIBLE_TO_ARM
 
 
+@dataclass(frozen=True, slots=True)
+class DeadlinePlanningObservation:
+    """Read-only result shared by the production planner and diagnostic probe."""
+
+    event: FplEvent
+    observed_at_utc: datetime
+
+    @property
+    def deadline_london(self) -> datetime:
+        return _to_london(self.event.deadline_utc)
+
+    @property
+    def is_current_london_day(self) -> bool:
+        return _to_london(self.observed_at_utc).date() == self.deadline_london.date()
+
+
 Clock = Callable[[], datetime]
 
 
@@ -54,14 +77,23 @@ class DeadlinePlanner:
         self._clock = clock or _utc_now
 
     def plan(self) -> DeadlinePlanningDecision:
+        observation = self.observe()
+        return decide_london_deadline_day(observation.event, observation.observed_at_utc)
+
+    def observe(self) -> DeadlinePlanningObservation:
+        """Fetch and select exactly the event needed by planning, without arming anything."""
+
         bootstrap = self._fpl_source.fetch_bootstrap_static()
         if not isinstance(bootstrap, Mapping) or "events" not in bootstrap:
-            raise DataValidationError("FPL bootstrap response must contain events")
+            raise FplBootstrapValidationError("FPL bootstrap response must contain events")
 
-        events = parse_events(bootstrap["events"])
+        try:
+            events = parse_events(bootstrap["events"])
+        except DataValidationError as exc:
+            raise FplBootstrapValidationError(str(exc)) from exc
         now_utc = _normalize_utc(self._clock(), "Current planning time")
         event = _select_planning_event(events, now_utc)
-        return decide_london_deadline_day(event, now_utc)
+        return DeadlinePlanningObservation(event=event, observed_at_utc=now_utc)
 
 
 def decide_london_deadline_day(
@@ -72,7 +104,7 @@ def decide_london_deadline_day(
     normalized_now = _normalize_utc(now_utc, "Current planning time")
     _require_utc(event.deadline_utc, "Official FPL deadline")
 
-    if to_london(normalized_now).date() != to_london(event.deadline_utc).date():
+    if _to_london(normalized_now).date() != _to_london(event.deadline_utc).date():
         return DeadlinePlanningDecision(status=DeadlinePlanningStatus.NOT_CURRENT_LONDON_DAY)
 
     return DeadlinePlanningDecision(
@@ -88,28 +120,40 @@ def _select_planning_event(
     events: Sequence[FplEvent],
     now_utc: datetime,
 ) -> FplEvent:
-    london_today = to_london(now_utc).date()
+    london_today = _to_london(now_utc).date()
     today_events = tuple(
-        event for event in events if to_london(event.deadline_utc).date() == london_today
+        event for event in events if _to_london(event.deadline_utc).date() == london_today
     )
     if len(today_events) > 1:
-        raise DataValidationError(
+        raise MultipleSameDayEventsError(
             "FPL exposes multiple event deadlines on the current Europe/London day"
         )
     if today_events:
         return today_events[0]
-    return select_next_event(events, now=now_utc)
+    try:
+        return select_next_event(events, now=now_utc)
+    except NoSuitableEventError:
+        raise
+    except DataValidationError as exc:
+        raise DeadlineEventSelectionError(str(exc)) from exc
 
 
 def _normalize_utc(value: datetime, label: str) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{label} must be timezone-aware")
+        raise DeadlineTimezoneError(f"{label} must be timezone-aware")
     return value.astimezone(UTC)
 
 
 def _require_utc(value: datetime, label: str) -> None:
     if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() != timedelta(0):
-        raise DataValidationError(f"{label} must be timezone-aware UTC")
+        raise DeadlineTimezoneError(f"{label} must be timezone-aware UTC")
+
+
+def _to_london(value: datetime) -> datetime:
+    try:
+        return to_london(value)
+    except (OverflowError, ValueError) as exc:
+        raise DeadlineTimezoneError("London deadline conversion failed") from exc
 
 
 def _utc_now() -> datetime:

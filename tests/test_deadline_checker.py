@@ -533,6 +533,9 @@ def test_planner_failure_is_retryable_without_arming_or_execution(failure: Excep
 
     assert result.status is DeadlineCheckerStatus.RETRYABLE_FAILURE
     assert result.instruction is None
+    assert result.failure_type == type(failure).__name__
+    assert result.failure_diagnostic is not None
+    assert set(result.failure_diagnostic.fields()) <= {"stage", "category", "http_status"}
     assert armer.instructions == []
     assert executor.instructions == []
 

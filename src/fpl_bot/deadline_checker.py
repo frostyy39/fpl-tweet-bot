@@ -15,7 +15,8 @@ from fpl_bot.deadline_revalidation import (
     ScheduledDeadlineInstruction,
     StaleDeadlineInstructionError,
 )
-from fpl_bot.errors import DataValidationError, FplApiError, FplBotError, NoSuitableEventError
+from fpl_bot.errors import DataValidationError, FplApiError, FplBotError
+from fpl_bot.fpl_diagnostics import FplFailureDiagnostic, diagnose_fpl_failure
 from fpl_bot.post_execution import (
     DeadlinePostExecutionResult,
     PostingStatePersistenceError,
@@ -62,6 +63,7 @@ class DeadlineCheckerResult:
     failure_type: str | None = None
     preflight_status: PreflightTaskArmingStatus | None = None
     preflight_failure_type: str | None = None
+    failure_diagnostic: FplFailureDiagnostic | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -93,6 +95,10 @@ class DeadlineCheckerResult:
         if failure != (self.failure_type is not None):
             raise DeadlineCheckerValidationError(
                 "Only failure results require a non-secret failure type"
+            )
+        if self.failure_diagnostic is not None and not failure:
+            raise DeadlineCheckerValidationError(
+                "A checker diagnostic belongs only to a failure result"
             )
         final_task_success = self.status in {
             DeadlineCheckerStatus.TASK_ARMED,
@@ -158,11 +164,12 @@ class DeadlineChecker:
         checked_at_utc = self._validated_now()
         try:
             planning = self._planner.plan()
-        except (FplApiError, DataValidationError, NoSuitableEventError) as exc:
+        except Exception as exc:
             return _failure_result(
                 DeadlineCheckerStatus.RETRYABLE_FAILURE,
                 checked_at_utc,
                 failure=exc,
+                diagnostic=diagnose_fpl_failure(exc),
             )
 
         if planning.status is DeadlinePlanningStatus.NOT_CURRENT_LONDON_DAY:
@@ -339,12 +346,14 @@ def _failure_result(
     *,
     failure: Exception,
     instruction: ScheduledDeadlineInstruction | None = None,
+    diagnostic: FplFailureDiagnostic | None = None,
 ) -> DeadlineCheckerResult:
     return DeadlineCheckerResult(
         status=status,
         checked_at_utc=checked_at_utc,
         instruction=instruction,
         failure_type=type(failure).__name__,
+        failure_diagnostic=diagnostic,
     )
 
 

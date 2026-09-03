@@ -7,11 +7,20 @@ import pytest
 
 from fpl_bot.deadline_planning import (
     DeadlinePlanner,
+    DeadlinePlanningObservation,
     DeadlinePlanningStatus,
     decide_london_deadline_day,
 )
 from fpl_bot.deadline_revalidation import ScheduledDeadlineInstruction
-from fpl_bot.errors import DataValidationError, FplApiError, NoSuitableEventError
+from fpl_bot.errors import (
+    DataValidationError,
+    DeadlineEventSelectionError,
+    DeadlineTimezoneError,
+    FplApiError,
+    FplBootstrapValidationError,
+    MultipleSameDayEventsError,
+    NoSuitableEventError,
+)
 from fpl_bot.models import FplEvent
 
 
@@ -351,3 +360,62 @@ def test_planning_reads_only_bootstrap_and_has_no_fixture_or_state_activity() ->
     planner.plan()
 
     assert source.calls == ["bootstrap"]
+
+
+def test_observation_reuses_exact_bootstrap_selection_and_london_logic() -> None:
+    now = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    deadline = datetime(2026, 8, 30, 10, 30, tzinfo=UTC)
+    planner, source = planner_for(now=now, events=[event_payload(3, deadline, is_next=True)])
+
+    observation = planner.observe()
+
+    assert observation == DeadlinePlanningObservation(observation.event, now)
+    assert observation.event.event_id == 3
+    assert observation.deadline_london.isoformat() == "2026-08-30T11:30:00+01:00"
+    assert observation.is_current_london_day is False
+    assert source.calls == ["bootstrap"]
+
+
+def test_multiple_same_day_events_has_specific_selection_failure_type() -> None:
+    now = datetime(2026, 8, 29, 8, 0, tzinfo=UTC)
+    planner, _ = planner_for(
+        now=now,
+        events=[
+            event_payload(3, datetime(2026, 8, 29, 10, 30, tzinfo=UTC)),
+            event_payload(4, datetime(2026, 8, 29, 17, 30, tzinfo=UTC)),
+        ],
+    )
+
+    with pytest.raises(MultipleSameDayEventsError):
+        planner.observe()
+
+
+def test_chronology_contradiction_has_specific_selection_failure_type() -> None:
+    now = datetime(2026, 8, 1, tzinfo=UTC)
+    planner, _ = planner_for(
+        now=now,
+        events=[
+            event_payload(2, now + timedelta(days=1)),
+            event_payload(3, now + timedelta(days=7), is_next=True),
+        ],
+    )
+
+    with pytest.raises(DeadlineEventSelectionError, match="earlier unpassed deadline"):
+        planner.observe()
+
+
+def test_bootstrap_event_schema_failure_has_specific_failure_type() -> None:
+    source = FakeFplSource({"events": "not-an-array"})
+
+    with pytest.raises(FplBootstrapValidationError):
+        DeadlinePlanner(source, clock=lambda: datetime(2026, 8, 1, tzinfo=UTC)).observe()
+
+
+def test_naive_probe_clock_has_specific_timezone_failure_type() -> None:
+    planner, _ = planner_for(
+        now=datetime(2026, 8, 29, 8, 0),
+        events=[event_payload(3, datetime(2026, 8, 30, 10, 30, tzinfo=UTC))],
+    )
+
+    with pytest.raises(DeadlineTimezoneError):
+        planner.observe()

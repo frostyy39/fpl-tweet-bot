@@ -1,4 +1,5 @@
 import json
+import logging
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -22,6 +23,11 @@ from fpl_bot.deadline_planning import DeadlinePlanningDecision, DeadlinePlanning
 from fpl_bot.deadline_revalidation import (
     DeadlineExecutionRevalidator,
     ScheduledDeadlineInstruction,
+)
+from fpl_bot.fpl_diagnostics import (
+    FplDiagnosticCategory,
+    FplDiagnosticStage,
+    FplFailureDiagnostic,
 )
 from fpl_bot.post_execution import (
     DeadlinePostExecutionCoordinator,
@@ -194,6 +200,36 @@ def test_retryable_checker_outcome_returns_503() -> None:
     assert response.json_body() == {"result": CheckerHttpResult.RETRYABLE.value}
 
 
+def test_retryable_checker_logs_only_allowlisted_server_diagnostic(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "sensitive-upstream-detail"
+    result = DeadlineCheckerResult(
+        DeadlineCheckerStatus.RETRYABLE_FAILURE,
+        AFTER_DEADLINE_UTC,
+        failure_type=secret,
+        failure_diagnostic=FplFailureDiagnostic(
+            FplDiagnosticStage.FPL_BOOTSTRAP,
+            FplDiagnosticCategory.HTTP_ERROR,
+            503,
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="fpl_bot.checker_http_handler"):
+        response = handle_checker_run(FakeChecker(result))
+
+    assert response.status_code == CHECKER_RETRYABLE_HTTP_STATUS
+    assert response.json_body() == {"result": "retryable"}
+    assert len(caplog.records) == 1
+    assert json.loads(caplog.records[0].message) == {
+        "event": "checker_retryable",
+        "stage": "fpl_bootstrap",
+        "category": "http_error",
+        "http_status": 503,
+    }
+    assert secret not in caplog.text
+
+
 def test_preflight_arming_failure_is_distinct_and_retryable_without_error_text() -> None:
     result = checker_result(DeadlineCheckerStatus.TASK_ARMED)
     result = DeadlineCheckerResult(
@@ -210,14 +246,23 @@ def test_preflight_arming_failure_is_distinct_and_retryable_without_error_text()
     assert b"SensitiveProviderException" not in json.dumps(response.json_body()).encode()
 
 
-def test_unknown_exception_is_retryable_and_response_is_redacted() -> None:
+def test_unknown_exception_is_retryable_and_response_and_log_are_redacted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     secret = "Authorization: Bearer should-never-be-returned"
 
-    response = handle_checker_run(FakeChecker(RuntimeError(secret)))
+    with caplog.at_level(logging.WARNING, logger="fpl_bot.checker_http_handler"):
+        response = handle_checker_run(FakeChecker(RuntimeError(secret)))
 
     assert response.status_code == CHECKER_RETRYABLE_HTTP_STATUS
     assert response.json_body() == {"result": CheckerHttpResult.RETRYABLE.value}
     assert secret not in json.dumps(response.json_body())
+    assert json.loads(caplog.records[0].message) == {
+        "event": "checker_retryable",
+        "stage": "checker",
+        "category": "unexpected_internal",
+    }
+    assert secret not in caplog.text
 
 
 def test_post_checker_route_invokes_checker_exactly_once() -> None:

@@ -1,13 +1,17 @@
 """HTTP acknowledgement policy for one private deadline-checker invocation."""
 
+import json
+import logging
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
 from fpl_bot.deadline_checker import DeadlineCheckerResult, DeadlineCheckerStatus
+from fpl_bot.fpl_diagnostics import FplFailureDiagnostic, diagnose_fpl_failure
 
 CHECKER_ACKNOWLEDGED_HTTP_STATUS = 200
 CHECKER_RETRYABLE_HTTP_STATUS = 503
+LOGGER = logging.getLogger(__name__)
 
 
 class CheckerHttpResult(StrEnum):
@@ -57,7 +61,8 @@ def handle_checker_run(checker: DeadlineCheckerBoundary) -> CheckerHttpResponse:
     """Run the checker once and select acknowledgement versus later delivery retry."""
     try:
         outcome = checker.run()
-    except Exception:
+    except Exception as error:
+        _log_retryable(diagnose_fpl_failure(error))
         return _retry()
 
     if outcome.preflight_failure_type is not None:
@@ -67,6 +72,7 @@ def handle_checker_run(checker: DeadlineCheckerBoundary) -> CheckerHttpResponse:
         )
     status = outcome.status
     if status is DeadlineCheckerStatus.RETRYABLE_FAILURE:
+        _log_retryable(outcome.failure_diagnostic or diagnose_fpl_failure(RuntimeError()))
         return _retry()
     result = _ACKNOWLEDGED_RESULTS.get(status)
     if result is None:
@@ -76,3 +82,9 @@ def handle_checker_run(checker: DeadlineCheckerBoundary) -> CheckerHttpResponse:
 
 def _retry() -> CheckerHttpResponse:
     return CheckerHttpResponse(CHECKER_RETRYABLE_HTTP_STATUS, CheckerHttpResult.RETRYABLE)
+
+
+def _log_retryable(diagnostic: FplFailureDiagnostic) -> None:
+    payload: dict[str, str | int] = {"event": "checker_retryable"}
+    payload.update(diagnostic.fields())
+    LOGGER.warning(json.dumps(payload, sort_keys=True, separators=(",", ":")))
