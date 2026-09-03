@@ -13,7 +13,23 @@ from fpl_bot.firestore_state import FirestoreClient
 from fpl_bot.runtime_config import ProductionConfigurationError, XCloudRuntimeConfig
 from fpl_bot.x_api import XHttpTransport, XIdentityClient, XIdentityReader
 from fpl_bot.x_config import X_POSTING_ENABLED_VARIABLE
-from fpl_bot.x_errors import XIdentityMismatchError
+from fpl_bot.x_errors import (
+    XApiResponseError,
+    XConfigurationError,
+    XIdentityMismatchError,
+    XOAuthEndpointError,
+    XRequestRejectedError,
+    XResponseValidationError,
+    XTokenAuthorityPersistenceError,
+    XTokenAuthorityUnconfirmedError,
+    XTokenConcurrencyError,
+    XTokenRefreshResponseError,
+    XTokenRefreshTransportError,
+    XTokenSecretStorageError,
+    XTokenStateError,
+    XTokenStoreError,
+    XTransportError,
+)
 from fpl_bot.x_token_refresh import (
     RefreshingXAccessTokenProvider,
     XOAuthRefreshClient,
@@ -26,6 +42,70 @@ class XOAuthIdentityVerificationResult:
     """Non-secret result of one exact expected-account verification."""
 
     user_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class XOAuthVerificationDiagnostic:
+    """Allowlisted non-secret details for one failed verification attempt."""
+
+    stage: str
+    category: str
+    http_status: int | None = None
+
+    def as_payload(self) -> dict[str, str | int]:
+        payload: dict[str, str | int] = {
+            "result": "verification_failed",
+            "stage": self.stage,
+            "category": self.category,
+        }
+        if self.http_status is not None:
+            payload["http_status"] = self.http_status
+        return payload
+
+
+def diagnose_verification_failure(error: Exception) -> XOAuthVerificationDiagnostic:
+    """Classify by trusted exception type without rendering exception details."""
+
+    if isinstance(error, XTokenRefreshTransportError):
+        return XOAuthVerificationDiagnostic("oauth_refresh", "transport_failure")
+    if isinstance(error, XOAuthEndpointError):
+        return XOAuthVerificationDiagnostic(
+            "oauth_refresh",
+            error.oauth_error or "oauth_http_error",
+            error.status_code,
+        )
+    if isinstance(error, XTokenRefreshResponseError):
+        return XOAuthVerificationDiagnostic("oauth_refresh", "invalid_token_response")
+    if isinstance(error, XTokenSecretStorageError):
+        return XOAuthVerificationDiagnostic("token_persistence", "secret_store_failure")
+    if isinstance(
+        error,
+        (
+            XTokenAuthorityPersistenceError,
+            XTokenAuthorityUnconfirmedError,
+            XTokenConcurrencyError,
+        ),
+    ):
+        return XOAuthVerificationDiagnostic("token_authority", "authority_failure")
+    if isinstance(error, XTokenStateError):
+        return XOAuthVerificationDiagnostic("token_state", "invalid_authoritative_state")
+    if isinstance(error, XTokenStoreError):
+        return XOAuthVerificationDiagnostic("token_authority", "token_store_failure")
+    if isinstance(error, XIdentityMismatchError):
+        return XOAuthVerificationDiagnostic("identity", "identity_mismatch")
+    if isinstance(error, XTransportError):
+        return XOAuthVerificationDiagnostic("identity", "transport_failure")
+    if isinstance(error, (XRequestRejectedError, XApiResponseError)):
+        return XOAuthVerificationDiagnostic(
+            "identity",
+            "identity_request_failure",
+            error.status_code,
+        )
+    if isinstance(error, XResponseValidationError):
+        return XOAuthVerificationDiagnostic("identity", "invalid_identity_response")
+    if isinstance(error, (ProductionConfigurationError, XConfigurationError)):
+        return XOAuthVerificationDiagnostic("configuration", "invalid_configuration")
+    return XOAuthVerificationDiagnostic("internal", "unexpected_failure")
 
 
 class XOAuthIdentityVerifier:

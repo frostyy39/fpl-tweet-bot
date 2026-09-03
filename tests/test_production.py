@@ -175,6 +175,7 @@ class SuccessfulRefreshTransport:
                     "scope": "tweet.read users.read tweet.write offline.access",
                 }
             ).encode(),
+            {"Content-Type": "application/json"},
         )
 
 

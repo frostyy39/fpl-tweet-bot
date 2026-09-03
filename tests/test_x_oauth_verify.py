@@ -14,8 +14,13 @@ from fpl_bot.x_errors import (
     XApiResponseError,
     XConfigurationError,
     XIdentityMismatchError,
+    XOAuthEndpointError,
     XResponseValidationError,
+    XTokenAuthorityPersistenceError,
     XTokenRefreshError,
+    XTokenRefreshResponseError,
+    XTokenRefreshTransportError,
+    XTokenSecretStorageError,
     XTokenStoreError,
 )
 from fpl_bot.x_oauth import OAUTH_SCOPES
@@ -23,6 +28,7 @@ from fpl_bot.x_oauth_verify import (
     XOAuthIdentityVerificationResult,
     XOAuthIdentityVerifier,
     create_cloud_oauth_identity_verifier,
+    diagnose_verification_failure,
 )
 from fpl_bot.x_token_refresh import (
     InMemoryXTokenStateStore,
@@ -120,6 +126,7 @@ def refresh_response() -> XHttpResponse:
                 "token_type": "bearer",
             }
         ).encode(),
+        {"Content-Type": "application/json"},
     )
 
 
@@ -372,8 +379,150 @@ def test_cli_failure_output_never_contains_exception_or_secret(
     assert cli_module.main() == 1
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert json.loads(captured.err) == {"result": "verification_failed"}
+    assert json.loads(captured.err) == {
+        "result": "verification_failed",
+        "stage": "internal",
+        "category": "unexpected_failure",
+    }
     assert secret not in captured.err
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            XOAuthEndpointError(401, "invalid_client"),
+            {
+                "result": "verification_failed",
+                "stage": "oauth_refresh",
+                "category": "invalid_client",
+                "http_status": 401,
+            },
+        ),
+        (
+            XOAuthEndpointError(400, "invalid_grant"),
+            {
+                "result": "verification_failed",
+                "stage": "oauth_refresh",
+                "category": "invalid_grant",
+                "http_status": 400,
+            },
+        ),
+        (
+            XOAuthEndpointError(400, "invalid_scope"),
+            {
+                "result": "verification_failed",
+                "stage": "oauth_refresh",
+                "category": "invalid_scope",
+                "http_status": 400,
+            },
+        ),
+        (
+            XOAuthEndpointError(503),
+            {
+                "result": "verification_failed",
+                "stage": "oauth_refresh",
+                "category": "oauth_http_error",
+                "http_status": 503,
+            },
+        ),
+        (
+            XTokenRefreshTransportError("secret transport detail"),
+            {
+                "result": "verification_failed",
+                "stage": "oauth_refresh",
+                "category": "transport_failure",
+            },
+        ),
+        (
+            XTokenRefreshResponseError("secret response detail"),
+            {
+                "result": "verification_failed",
+                "stage": "oauth_refresh",
+                "category": "invalid_token_response",
+            },
+        ),
+        (
+            XTokenSecretStorageError("secret storage detail"),
+            {
+                "result": "verification_failed",
+                "stage": "token_persistence",
+                "category": "secret_store_failure",
+            },
+        ),
+        (
+            XTokenAuthorityPersistenceError("projects/p/secrets/s/versions/2"),
+            {
+                "result": "verification_failed",
+                "stage": "token_authority",
+                "category": "authority_failure",
+            },
+        ),
+        (
+            XIdentityMismatchError("secret identity detail"),
+            {
+                "result": "verification_failed",
+                "stage": "identity",
+                "category": "identity_mismatch",
+            },
+        ),
+    ],
+)
+def test_failure_diagnostics_are_allowlisted_and_stage_specific(
+    error: Exception,
+    expected: dict[str, str | int],
+) -> None:
+    payload = diagnose_verification_failure(error).as_payload()
+
+    assert payload == expected
+    assert set(payload) <= {"result", "stage", "category", "http_status"}
+    assert "detail" not in json.dumps(payload)
+
+
+def test_cli_emits_only_allowlisted_typed_failure_fields(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    secret = "credential-value-that-must-not-escape"
+
+    class FailingVerifier:
+        def verify(self) -> XOAuthIdentityVerificationResult:
+            raise XOAuthEndpointError(400, "invalid_grant") from RuntimeError(secret)
+
+    monkeypatch.setattr(
+        cli_module,
+        "create_cloud_oauth_identity_verifier",
+        lambda: FailingVerifier(),
+    )
+
+    assert cli_module.main() == 1
+    captured = capsys.readouterr()
+    payload = json.loads(captured.err)
+    assert payload == {
+        "result": "verification_failed",
+        "stage": "oauth_refresh",
+        "category": "invalid_grant",
+        "http_status": 400,
+    }
+    assert secret not in captured.err
+
+
+def test_unrecognized_provider_error_cannot_become_a_diagnostic_category() -> None:
+    payload = diagnose_verification_failure(
+        XOAuthEndpointError(400, "provider_error_containing_sensitive_detail")
+    ).as_payload()
+
+    assert payload == {
+        "result": "verification_failed",
+        "stage": "oauth_refresh",
+        "category": "oauth_http_error",
+        "http_status": 400,
+    }
+
+
+@pytest.mark.parametrize("status", [True, 0, 99, 600, "400"])
+def test_oauth_endpoint_diagnostic_requires_numeric_http_status(status: object) -> None:
+    with pytest.raises(ValueError, match="HTTP integer"):
+        XOAuthEndpointError(status)  # type: ignore[arg-type]
 
 
 def test_cli_success_outputs_only_non_secret_identity(

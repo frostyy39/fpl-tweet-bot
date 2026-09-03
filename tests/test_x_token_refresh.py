@@ -11,8 +11,11 @@ from fpl_bot.x_config import XPostingConfig
 from fpl_bot.x_errors import (
     XAmbiguousWriteError,
     XIdentityMismatchError,
+    XOAuthEndpointError,
     XTokenConcurrencyError,
     XTokenRefreshError,
+    XTokenRefreshResponseError,
+    XTokenRefreshTransportError,
     XTokenStateError,
     XTokenStoreError,
     XTransportError,
@@ -153,7 +156,11 @@ def provider(
 
 
 def response(payload: object, status: int = 200) -> XHttpResponse:
-    return XHttpResponse(status, json.dumps(payload).encode())
+    return XHttpResponse(
+        status,
+        json.dumps(payload).encode(),
+        {"Content-Type": "application/json"},
+    )
 
 
 def refresh_payload(**overrides: object) -> dict[str, object]:
@@ -403,6 +410,125 @@ def test_omitted_scope_retains_previously_validated_scope_set() -> None:
     assert refreshed.scopes == current.scopes
 
 
+@pytest.mark.parametrize(
+    "oauth_error",
+    [
+        "invalid_request",
+        "invalid_client",
+        "invalid_grant",
+        "unauthorized_client",
+        "unsupported_grant_type",
+        "invalid_scope",
+    ],
+)
+def test_standard_oauth_endpoint_errors_are_safely_typed(oauth_error: str) -> None:
+    response_body = {
+        "error": oauth_error,
+        "error_description": f"must not be retained: {REFRESH_TOKEN}",
+    }
+    transport = FakeTransport([response(response_body, status=400)])
+
+    with pytest.raises(XOAuthEndpointError) as captured:
+        XOAuthRefreshClient(transport=transport, now=lambda: NOW).refresh(
+            token_state(expires_at=NOW),
+            credentials(),
+        )
+
+    assert captured.value.status_code == 400
+    assert captured.value.oauth_error == oauth_error
+    assert REFRESH_TOKEN not in str(captured.value)
+    assert len(transport.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"not-json",
+        b"<html>upstream failure</html>",
+        b'{"error":"provider_specific_error","secret":"do-not-report"}',
+    ],
+)
+def test_non_oauth_http_failure_discards_response_body(body: bytes) -> None:
+    transport = FakeTransport([XHttpResponse(502, body)])
+
+    with pytest.raises(XOAuthEndpointError) as captured:
+        XOAuthRefreshClient(transport=transport, now=lambda: NOW).refresh(
+            token_state(expires_at=NOW),
+            credentials(),
+        )
+
+    assert captured.value.status_code == 502
+    assert captured.value.oauth_error is None
+    assert body.decode(errors="ignore") not in str(captured.value)
+    assert len(transport.requests) == 1
+
+
+def test_malformed_success_is_distinct_from_oauth_endpoint_rejection() -> None:
+    transport = FakeTransport(
+        [XHttpResponse(200, b"not-json", {"Content-Type": "application/json"})]
+    )
+
+    with pytest.raises(XTokenRefreshResponseError):
+        XOAuthRefreshClient(transport=transport, now=lambda: NOW).refresh(
+            token_state(expires_at=NOW),
+            credentials(),
+        )
+
+    assert len(transport.requests) == 1
+
+
+def test_success_with_wrong_content_type_is_an_invalid_token_response() -> None:
+    transport = FakeTransport(
+        [
+            XHttpResponse(
+                200,
+                json.dumps(refresh_payload()).encode(),
+                {"Content-Type": "text/html; charset=utf-8"},
+            )
+        ]
+    )
+
+    with pytest.raises(XTokenRefreshResponseError, match="content type"):
+        XOAuthRefreshClient(transport=transport, now=lambda: NOW).refresh(
+            token_state(expires_at=NOW),
+            credentials(),
+        )
+
+    assert len(transport.requests) == 1
+
+
+def test_success_without_content_type_is_an_invalid_token_response() -> None:
+    transport = FakeTransport([XHttpResponse(200, json.dumps(refresh_payload()).encode())])
+
+    with pytest.raises(XTokenRefreshResponseError, match="content type"):
+        XOAuthRefreshClient(transport=transport, now=lambda: NOW).refresh(
+            token_state(expires_at=NOW),
+            credentials(),
+        )
+
+    assert len(transport.requests) == 1
+
+
+def test_json_content_type_with_charset_is_accepted() -> None:
+    transport = FakeTransport(
+        [
+            XHttpResponse(
+                200,
+                json.dumps(refresh_payload()).encode(),
+                {"Content-Type": "application/json; charset=utf-8"},
+            )
+        ]
+    )
+
+    refreshed = XOAuthRefreshClient(transport=transport, now=lambda: NOW).refresh(
+        token_state(expires_at=NOW),
+        credentials(),
+    )
+
+    assert refreshed.access_token == NEW_ACCESS_TOKEN
+    assert len(transport.requests) == 1
+
+
 def test_secret_values_are_absent_from_state_snapshot_request_response_and_errors() -> None:
     state = token_state()
     snapshot = VersionedXTokenState("1", state)
@@ -611,7 +737,7 @@ def test_identity_mismatch_after_refresh_prevents_create_post() -> None:
 def test_refresh_transport_failure_is_typed_and_never_retried() -> None:
     transport = FakeTransport([XTransportError("network unavailable")])
 
-    with pytest.raises(XTokenRefreshError, match="network boundary"):
+    with pytest.raises(XTokenRefreshTransportError, match="network boundary"):
         XOAuthRefreshClient(transport=transport, now=lambda: NOW).refresh(
             token_state(expires_at=NOW),
             credentials(),

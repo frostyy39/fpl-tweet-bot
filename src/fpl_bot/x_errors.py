@@ -2,6 +2,17 @@
 
 from fpl_bot.errors import FplBotError
 
+STANDARD_OAUTH_TOKEN_ERROR_CODES = frozenset(
+    {
+        "invalid_request",
+        "invalid_client",
+        "invalid_grant",
+        "unauthorized_client",
+        "unsupported_grant_type",
+        "invalid_scope",
+    }
+)
+
 
 class XApiError(FplBotError):
     """Base class for expected X integration failures."""
@@ -85,6 +96,29 @@ class XTokenStateError(XTokenError):
 
 class XTokenRefreshError(XTokenError):
     """Raised when OAuth refresh cannot produce a validated credential."""
+
+
+class XTokenRefreshTransportError(XTokenRefreshError):
+    """Raised when the OAuth token endpoint cannot be reached safely."""
+
+
+class XOAuthEndpointError(XTokenRefreshError):
+    """A sanitized HTTP failure returned by the OAuth token endpoint."""
+
+    def __init__(self, status_code: int, oauth_error: str | None = None) -> None:
+        if (
+            isinstance(status_code, bool)
+            or not isinstance(status_code, int)
+            or not 100 <= status_code <= 599
+        ):
+            raise ValueError("OAuth endpoint status code must be an HTTP integer")
+        super().__init__(f"X OAuth token endpoint returned HTTP {status_code}")
+        self.status_code = status_code
+        self.oauth_error = oauth_error if oauth_error in STANDARD_OAUTH_TOKEN_ERROR_CODES else None
+
+
+class XTokenRefreshResponseError(XTokenRefreshError):
+    """Raised when a successful OAuth response has an invalid token payload."""
 
 
 class XTokenStoreError(XTokenError):

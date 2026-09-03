@@ -3,14 +3,18 @@
 import json
 import sys
 
-from fpl_bot.x_oauth_verify import create_cloud_oauth_identity_verifier
+from fpl_bot.x_oauth_verify import (
+    create_cloud_oauth_identity_verifier,
+    diagnose_verification_failure,
+)
 
 
 def main() -> int:
     try:
         result = create_cloud_oauth_identity_verifier().verify()
-    except Exception:
-        print(json.dumps({"result": "verification_failed"}), file=sys.stderr)
+    except Exception as error:
+        diagnostic = diagnose_verification_failure(error)
+        print(json.dumps(diagnostic.as_payload(), sort_keys=True), file=sys.stderr)
         return 1
     print(
         json.dumps(

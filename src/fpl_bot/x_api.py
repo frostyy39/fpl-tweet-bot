@@ -54,6 +54,7 @@ class XHttpRequest:
 class XHttpResponse:
     status_code: int
     body: bytes = field(repr=False)
+    headers: Mapping[str, str] = field(default_factory=dict, repr=False)
 
 
 class XPostCreator(Protocol):
@@ -108,13 +109,21 @@ class UrllibXHttpTransport:
         )
         try:
             with self._opener.open(urllib_request, timeout=timeout_seconds) as response:
-                return XHttpResponse(status_code=response.status, body=response.read())
+                return XHttpResponse(
+                    status_code=response.status,
+                    body=response.read(),
+                    headers=dict(response.headers.items()),
+                )
         except HTTPError as exc:
             try:
                 body = exc.read()
             except (HTTPException, OSError):
                 body = b""
-            return XHttpResponse(status_code=exc.code, body=body)
+            return XHttpResponse(
+                status_code=exc.code,
+                body=body,
+                headers=dict(exc.headers.items()) if exc.headers is not None else {},
+            )
         except (HTTPException, URLError, TimeoutError, OSError) as exc:
             raise XTransportError("X API network request failed") from exc
 

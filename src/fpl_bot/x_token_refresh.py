@@ -16,8 +16,12 @@ from fpl_bot.x_api import (
     XHttpTransport,
 )
 from fpl_bot.x_errors import (
+    STANDARD_OAUTH_TOKEN_ERROR_CODES,
+    XOAuthEndpointError,
     XTokenConcurrencyError,
     XTokenRefreshError,
+    XTokenRefreshResponseError,
+    XTokenRefreshTransportError,
     XTokenStateError,
     XTokenStoreError,
     XTransportError,
@@ -224,9 +228,14 @@ class XOAuthRefreshClient:
         try:
             response = self._transport.send(request, self._timeout_seconds)
         except XTransportError:
-            raise XTokenRefreshError("X OAuth refresh failed at the network boundary") from None
+            raise XTokenRefreshTransportError(
+                "X OAuth refresh failed at the network boundary"
+            ) from None
         if response.status_code != 200:
-            raise XTokenRefreshError(f"X OAuth refresh failed with HTTP {response.status_code}")
+            raise XOAuthEndpointError(
+                response.status_code,
+                _standard_oauth_error(response.body),
+            )
         return _parse_refresh_response(
             response,
             current=current,
@@ -433,20 +442,25 @@ def _parse_refresh_response(
     current: XOAuthTokenState,
     received_at_utc: datetime,
 ) -> XOAuthTokenState:
+    content_type = _response_header(response, "content-type")
+    if content_type is None or content_type.partition(";")[0].strip().casefold() != (
+        "application/json"
+    ):
+        raise XTokenRefreshResponseError("X OAuth refresh response has an invalid content type")
     try:
         payload = json.loads(response.body)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise XTokenRefreshError("X OAuth refresh response was not valid JSON") from exc
+        raise XTokenRefreshResponseError("X OAuth refresh response was not valid JSON") from exc
     if not isinstance(payload, Mapping):
-        raise XTokenRefreshError("X OAuth refresh response must be a JSON object")
+        raise XTokenRefreshResponseError("X OAuth refresh response must be a JSON object")
 
     access_token = _response_token(payload, "access_token", required=True)
     token_type = payload.get("token_type")
     if not isinstance(token_type, str) or token_type.casefold() != "bearer":
-        raise XTokenRefreshError("X OAuth refresh response has an invalid token type")
+        raise XTokenRefreshResponseError("X OAuth refresh response has an invalid token type")
     expires_in = payload.get("expires_in")
     if isinstance(expires_in, bool) or not isinstance(expires_in, int) or expires_in <= 0:
-        raise XTokenRefreshError("X OAuth refresh response has invalid expiry data")
+        raise XTokenRefreshResponseError("X OAuth refresh response has invalid expiry data")
     _require_utc(received_at_utc, "OAuth refresh receipt time")
 
     raw_scope = payload.get("scope")
@@ -455,22 +469,27 @@ def _parse_refresh_response(
     try:
         expires_at_utc = received_at_utc + timedelta(seconds=expires_in)
     except OverflowError as exc:
-        raise XTokenRefreshError("X OAuth refresh response expiry is out of range") from exc
-    return XOAuthTokenState(
-        access_token=access_token,
-        refresh_token=replacement_refresh_token or current.refresh_token,
-        expires_at_utc=expires_at_utc,
-        token_type="bearer",
-        scopes=scopes,
-    )
+        raise XTokenRefreshResponseError("X OAuth refresh response expiry is out of range") from exc
+    try:
+        return XOAuthTokenState(
+            access_token=access_token,
+            refresh_token=replacement_refresh_token or current.refresh_token,
+            expires_at_utc=expires_at_utc,
+            token_type="bearer",
+            scopes=scopes,
+        )
+    except XTokenStateError as exc:
+        raise XTokenRefreshResponseError(
+            "X OAuth refresh response did not produce valid token state"
+        ) from exc
 
 
 def _parse_response_scopes(raw_scope: Any) -> tuple[str, ...]:
     if not isinstance(raw_scope, str) or not raw_scope.strip():
-        raise XTokenRefreshError("X OAuth refresh response has invalid scope data")
+        raise XTokenRefreshResponseError("X OAuth refresh response has invalid scope data")
     scopes = tuple(raw_scope.split())
     if len(scopes) != len(set(scopes)) or not set(OAUTH_SCOPES).issubset(scopes):
-        raise XTokenRefreshError("X OAuth refresh response is missing required V1 scopes")
+        raise XTokenRefreshResponseError("X OAuth refresh response is missing required V1 scopes")
     return scopes
 
 
@@ -491,8 +510,27 @@ def _response_token(payload: Mapping[str, Any], name: str, *, required: bool) ->
         return None
     value = payload.get(name)
     if not isinstance(value, str) or not value or value != value.strip() or not value.isprintable():
-        raise XTokenRefreshError(f"X OAuth refresh response has no valid {name}")
+        raise XTokenRefreshResponseError(f"X OAuth refresh response has no valid {name}")
     return value
+
+
+def _standard_oauth_error(body: bytes) -> str | None:
+    """Return only a standardized token-endpoint error code from an HTTP failure."""
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    error = payload.get("error")
+    return error if isinstance(error, str) and error in STANDARD_OAUTH_TOKEN_ERROR_CODES else None
+
+
+def _response_header(response: XHttpResponse, name: str) -> str | None:
+    for key, value in response.headers.items():
+        if key.casefold() == name.casefold():
+            return value if isinstance(value, str) else None
+    return None
 
 
 def _require_secret(value: str, label: str) -> None:
