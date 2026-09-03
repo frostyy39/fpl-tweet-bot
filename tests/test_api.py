@@ -5,7 +5,7 @@ from urllib.error import HTTPError, URLError
 
 import pytest
 
-from fpl_bot.api import FplApiClient
+from fpl_bot.api import FPL_REQUEST_HEADERS, USER_AGENT, FplApiClient
 from fpl_bot.errors import (
     FplApiError,
     FplApiHttpError,
@@ -30,9 +30,19 @@ class FakeResponse:
         return self.body
 
 
-def make_opener(body: bytes, calls: list[tuple[str, float]]) -> Callable[..., Any]:
+RequestCall = tuple[str, float, str | None, str | None]
+
+
+def make_opener(body: bytes, calls: list[RequestCall]) -> Callable[..., Any]:
     def opener(request: Any, timeout: float) -> FakeResponse:
-        calls.append((request.full_url, timeout))
+        calls.append(
+            (
+                request.full_url,
+                timeout,
+                request.get_header("User-agent"),
+                request.get_header("Accept"),
+            )
+        )
         return FakeResponse(body)
 
     return opener
@@ -46,11 +56,35 @@ def raising_opener(error: Exception) -> Callable[..., Any]:
 
 
 def test_api_client_queries_event_filtered_fixture_endpoint() -> None:
-    calls: list[tuple[str, float]] = []
+    calls: list[RequestCall] = []
     client = FplApiClient(timeout_seconds=4.5, opener=make_opener(b"[]", calls))
 
     assert client.fetch_event_fixtures(7) == []
-    assert calls == [("https://fantasy.premierleague.com/api/fixtures/?event=7", 4.5)]
+    assert calls == [
+        (
+            "https://fantasy.premierleague.com/api/fixtures/?event=7",
+            4.5,
+            USER_AGENT,
+            "application/json",
+        )
+    ]
+
+
+def test_bootstrap_request_uses_central_browser_compatible_headers() -> None:
+    calls: list[RequestCall] = []
+    client = FplApiClient(opener=make_opener(b"{}", calls))
+
+    assert client.fetch_bootstrap_static() == {}
+    assert calls == [
+        (
+            "https://fantasy.premierleague.com/api/bootstrap-static/",
+            10.0,
+            USER_AGENT,
+            "application/json",
+        )
+    ]
+    assert USER_AGENT.startswith("Mozilla/5.0 ")
+    assert FPL_REQUEST_HEADERS == {"Accept": "application/json", "User-Agent": USER_AGENT}
 
 
 def test_api_client_rejects_invalid_json() -> None:

@@ -18,7 +18,11 @@ from fpl_bot.errors import (
 )
 
 FPL_API_BASE_URL = "https://fantasy.premierleague.com/api/"
-USER_AGENT = "fpl-tweet-bot/0.1 (+read-only dry run)"
+USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+FPL_REQUEST_HEADERS = {"Accept": "application/json", "User-Agent": USER_AGENT}
 
 Opener = Callable[..., Any]
 
@@ -57,7 +61,7 @@ class FplApiClient:
     def _get_json(self, relative_url: str) -> Any:
         request = Request(
             f"{self._base_url}{relative_url}",
-            headers={"Accept": "application/json", "User-Agent": USER_AGENT},
+            headers=FPL_REQUEST_HEADERS,
         )
         try:
             with self._opener(request, timeout=self._timeout_seconds) as response:
