@@ -194,6 +194,27 @@ def test_adapter_submits_exact_schedule_http_target_oidc_and_payload() -> None:
     assert retry is None
 
 
+def test_cloud_run_region_does_not_change_authoritative_utc_schedule_time() -> None:
+    deadline = datetime(2026, 9, 4, 17, 30, tzinfo=UTC)
+    api_tasks = []
+
+    for region in ("europe-west2", "europe-west1"):
+        regional_config = CloudTasksConfig(
+            project_id="fpl-bot-test",
+            location_id="europe-west2",
+            queue_id="deadline-posts",
+            execution_url=f"https://fpl-bot-{region}.example/tasks/deadline",
+            service_account_email="task-caller@fpl-bot-test.iam.gserviceaccount.com",
+            oidc_audience=f"https://fpl-bot-{region}.example",
+        )
+        adapter = GoogleCloudTasksAdapter(regional_config, FakeCloudTasksClient())
+        api_tasks.append(adapter._api_task(adapter.build_task(instruction(deadline=deadline))))
+
+    assert api_tasks[0].schedule_time == deadline
+    assert api_tasks[1].schedule_time == deadline
+    assert api_tasks[0].schedule_time == api_tasks[1].schedule_time
+
+
 def test_duplicate_name_is_idempotent_and_never_renamed() -> None:
     client = FakeCloudTasksClient(AlreadyExists("duplicate"))
     adapter = GoogleCloudTasksAdapter(config(), client)
