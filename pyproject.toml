@@ -31,6 +31,7 @@ fpl-bot-x-bootstrap = "fpl_bot.x_token_bootstrap_cli:main"
 fpl-bot-x-reseed = "fpl_bot.x_token_reseed_cli:main"
 fpl-bot-x-verify = "fpl_bot.x_oauth_verify_cli:main"
 fpl-bot-fpl-probe = "fpl_bot.fpl_probe_cli:main"
+fpl-bot-fpl-http-probe = "fpl_bot.fpl_http_probe_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
