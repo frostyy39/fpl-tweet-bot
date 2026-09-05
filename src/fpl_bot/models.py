@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from enum import StrEnum
 
 
@@ -22,11 +23,20 @@ class Team:
 
 
 @dataclass(frozen=True, slots=True)
+class FplPlayer:
+    element_id: int
+    web_name: str
+    team_id: int
+    selected_by_percent: Decimal
+
+
+@dataclass(frozen=True, slots=True)
 class Fixture:
     fixture_id: int
     event_id: int
     home_team_id: int
     away_team_id: int
+    kickoff_time_utc: datetime | None = None
 
 
 class EventKind(StrEnum):

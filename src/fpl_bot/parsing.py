@@ -1,10 +1,12 @@
 """Validation and conversion of raw FPL team and fixture records."""
 
 from collections.abc import Mapping
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from fpl_bot.errors import DataValidationError
-from fpl_bot.models import Fixture, Team
+from fpl_bot.events import parse_deadline
+from fpl_bot.models import Fixture, FplPlayer, Team
 
 EXPECTED_TEAM_COUNT = 20
 
@@ -38,6 +40,17 @@ def parse_fixtures(payload: object, expected_event_id: int) -> tuple[Fixture, ..
     return fixtures
 
 
+def parse_players(payload: object) -> tuple[FplPlayer, ...]:
+    if not isinstance(payload, list):
+        raise DataValidationError("FPL players must be a JSON array")
+
+    players = tuple(_parse_player(item) for item in payload)
+    element_ids = [player.element_id for player in players]
+    if len(element_ids) != len(set(element_ids)):
+        raise DataValidationError("FPL players contain duplicate element IDs")
+    return players
+
+
 def _parse_team(payload: object) -> Team:
     if not isinstance(payload, Mapping):
         raise DataValidationError("Each FPL team must be a JSON object")
@@ -63,7 +76,36 @@ def _parse_fixture(payload: object, expected_event_id: int) -> Fixture:
     away_team_id = _positive_int(payload, "team_a", f"fixture {fixture_id}")
     if home_team_id == away_team_id:
         raise DataValidationError(f"Fixture {fixture_id} has the same home and away team")
-    return Fixture(fixture_id, event_id, home_team_id, away_team_id)
+    kickoff_value = payload.get("kickoff_time")
+    kickoff_time_utc = None if kickoff_value is None else parse_deadline(kickoff_value)
+    return Fixture(fixture_id, event_id, home_team_id, away_team_id, kickoff_time_utc)
+
+
+def _parse_player(payload: object) -> FplPlayer:
+    if not isinstance(payload, Mapping):
+        raise DataValidationError("Each FPL player must be a JSON object")
+    element_id = _positive_int(payload, "id", "player")
+    ownership_value = payload.get("selected_by_percent")
+    if not isinstance(ownership_value, str) or not ownership_value.strip():
+        raise DataValidationError(
+            f"Player {element_id} field selected_by_percent must be a decimal string"
+        )
+    try:
+        ownership = Decimal(ownership_value.strip())
+    except InvalidOperation as exc:
+        raise DataValidationError(
+            f"Player {element_id} field selected_by_percent must be a decimal string"
+        ) from exc
+    if not ownership.is_finite() or ownership < 0 or ownership > 100:
+        raise DataValidationError(
+            f"Player {element_id} selected_by_percent must be between 0 and 100"
+        )
+    return FplPlayer(
+        element_id=element_id,
+        web_name=_non_empty_string(payload, "web_name", f"Player {element_id}"),
+        team_id=_positive_int(payload, "team", f"player {element_id}"),
+        selected_by_percent=ownership,
+    )
 
 
 def _positive_int(payload: Mapping[str, Any], key: str, label: str) -> int:

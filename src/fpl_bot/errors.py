@@ -65,3 +65,23 @@ class DeadlineTimezoneError(DataValidationError, ValueError):
 
 class NoSuitableEventError(FplBotError):
     """Raised when FPL exposes no current or future event to process."""
+
+
+class CaptainError(FplBotError):
+    """Base class for deterministic Captain feature failures."""
+
+
+class CaptainProjectionError(CaptainError):
+    """Raised when projection data is missing, malformed, or insufficient."""
+
+
+class CaptainPlayerResolutionError(CaptainError):
+    """Raised when a projection cannot resolve to authoritative FPL player data."""
+
+
+class CaptainFixtureError(CaptainError):
+    """Raised when an enriched Captain selection has no valid event fixture."""
+
+
+class CaptainRenderingError(CaptainError):
+    """Raised when the canonical Captain post cannot be rendered safely."""
