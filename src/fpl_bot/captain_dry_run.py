@@ -1,6 +1,7 @@
 """Local-only Captain orchestration over live FPL data and a projection source."""
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -10,8 +11,17 @@ from fpl_bot.captain_service import build_captain_report
 from fpl_bot.captain_tweet import format_projection, render_fixture, x_weighted_text_length
 from fpl_bot.errors import DataValidationError
 from fpl_bot.events import parse_events, select_next_event
+from fpl_bot.models import EventReport, Fixture, FplPlayer, Team
 from fpl_bot.parsing import parse_fixtures, parse_players, parse_teams
 from fpl_bot.service import FplDataSource, build_event_report
+
+
+@dataclass(frozen=True, slots=True)
+class LiveCaptainContext:
+    event_report: EventReport
+    players: tuple[FplPlayer, ...]
+    teams: tuple[Team, ...]
+    fixtures: tuple[Fixture, ...]
 
 
 def build_live_captain_report(
@@ -20,6 +30,15 @@ def build_live_captain_report(
     *,
     now: datetime | None = None,
 ) -> CaptainReport:
+    context = fetch_live_captain_context(fpl_source, now=now)
+    return build_captain_report_from_context(context, projection_source)
+
+
+def fetch_live_captain_context(
+    fpl_source: FplDataSource,
+    *,
+    now: datetime | None = None,
+) -> LiveCaptainContext:
     bootstrap = fpl_source.fetch_bootstrap_static()
     _require_bootstrap_fields(bootstrap)
     event = select_next_event(parse_events(bootstrap["events"]), now=now)
@@ -30,12 +49,19 @@ def build_live_captain_report(
         expected_event_id=event.event_id,
     )
     event_report = build_event_report(event, teams, fixtures)
+    return LiveCaptainContext(event_report, players, teams, fixtures)
+
+
+def build_captain_report_from_context(
+    context: LiveCaptainContext,
+    projection_source: CaptainProjectionSource,
+) -> CaptainReport:
     return build_captain_report(
-        event_report,
+        context.event_report,
         projection_source,
-        players,
-        teams,
-        fixtures,
+        context.players,
+        context.teams,
+        context.fixtures,
     )
 
 

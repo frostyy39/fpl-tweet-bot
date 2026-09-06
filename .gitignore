@@ -15,3 +15,5 @@ __pycache__/
 oauth-token*.json
 .coverage
 htmlcov/
+.captain-browser-profile/
+captain-browser-profile/

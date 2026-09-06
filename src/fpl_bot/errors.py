@@ -75,6 +75,32 @@ class CaptainProjectionError(CaptainError):
     """Raised when projection data is missing, malformed, or insufficient."""
 
 
+class CaptainReviewBrowserError(CaptainProjectionError):
+    """Safe typed failure from the local FPL Review browser boundary."""
+
+    _ALLOWED_CATEGORIES = frozenset(
+        {
+            "browser_dependency_unavailable",
+            "browser_launch_failed",
+            "dedicated_profile_required",
+            "identity_resolution_failed",
+            "invalid_projection_table",
+            "premium_unavailable",
+            "projection_table_unavailable",
+            "reauthentication_required",
+            "stable_chrome_unavailable",
+            "table_load_timeout",
+            "upcoming_event_column_missing",
+        }
+    )
+
+    def __init__(self, category: str) -> None:
+        if category not in self._ALLOWED_CATEGORIES:
+            raise ValueError("Unsupported FPL Review browser failure category")
+        self.category = category
+        super().__init__(f"FPL Review browser acquisition failed: {category}")
+
+
 class CaptainPlayerResolutionError(CaptainError):
     """Raised when a projection cannot resolve to authoritative FPL player data."""
 

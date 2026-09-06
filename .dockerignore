@@ -30,4 +30,6 @@ AGENTS.md
 .vscode
 .DS_Store
 Thumbs.db
+.captain-browser-profile/
+captain-browser-profile/
 *.log
