@@ -86,6 +86,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             projection_source = FplReviewCsvProjectionSource(args.projections_csv)
         report = build_captain_report_from_context(context, projection_source)
     except FplBotError as exc:
+        if browser_acquirer is not None:
+            print(
+                json.dumps({"browser_lifecycle": browser_acquirer.last_lifecycle}, sort_keys=True)
+            )
         if isinstance(exc, CaptainReviewBrowserError):
             print(f"Captain dry run failed: {exc.category}", file=sys.stderr)
             if (
@@ -127,6 +131,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Captain dry run failed: {exc}", file=sys.stderr)
         return 1
 
+    if browser_acquirer is not None:
+        print(json.dumps({"browser_lifecycle": browser_acquirer.last_lifecycle}, sort_keys=True))
     print(render_captain_audit(report))
     if browser_source is not None:
         acquisition = browser_source.last_acquisition

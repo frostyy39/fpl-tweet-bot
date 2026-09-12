@@ -81,6 +81,11 @@ class CaptainReviewBrowserError(CaptainProjectionError):
     _ALLOWED_CATEGORIES = frozenset(
         {
             "browser_dependency_unavailable",
+            "browser_platform_unsupported",
+            "browser_keyring_unavailable",
+            "browser_profile_in_use",
+            "browser_profile_unclean",
+            "stable_chrome_ambiguous",
             "browser_launch_failed",
             "dedicated_profile_required",
             "identity_resolution_failed",

@@ -5,16 +5,26 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import unicodedata
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from time import monotonic
 from typing import Any, Protocol
 from urllib.parse import urlsplit, urlunsplit
 
+from fpl_bot.captain_browser_runtime import (
+    chrome_version,
+    discover_chrome,
+    own_profile,
+    reject_personal_profile,
+    require_keyring,
+    stable_candidates,
+)
 from fpl_bot.captain_models import CaptainProjection
 from fpl_bot.errors import CaptainReviewBrowserError
 from fpl_bot.models import FplPlayer, Team
@@ -362,8 +372,48 @@ class PlaywrightReviewBrowserAcquirer:
         self._profile_directory = require_dedicated_profile(profile_directory)
         self._timeout_milliseconds = int(timeout_seconds * 1000)
         self.last_navigation_diagnostic: ReviewNavigationDiagnostic | None = None
+        self.last_lifecycle: dict[str, str] = {}
 
     def acquire(self, event_id: int) -> ReviewPageSnapshot:
+        self.last_lifecycle = {
+            "platform": sys.platform,
+            "profile_classification": "captain_dedicated_external",
+            "started_at_utc": datetime.now(UTC).isoformat(),
+            "authentication": "not_checked",
+            "ownership": "not_acquired",
+        }
+        try:
+            executable = find_stable_chrome_executable()
+            self.last_lifecycle.update(
+                chrome_executable=str(executable),
+                chrome_version=chrome_version(executable),
+                playwright_version=version("playwright"),
+                keyring=require_keyring(),
+            )
+            with own_profile(self._profile_directory):
+                self.last_lifecycle["ownership"] = "exclusive"
+                failure = None
+                try:
+                    snapshot = self._acquire(event_id, executable)
+                except CaptainReviewBrowserError as exc:
+                    if exc.category in {"browser_launch_failed", "browser_profile_unclean"}:
+                        raise
+                    failure = exc
+            self.last_lifecycle.update(ownership="released", authentication="authenticated")
+            if failure is not None:
+                self.last_lifecycle["authentication"] = (
+                    "reauthentication_required"
+                    if failure.category == "reauthentication_required"
+                    else "not_confirmed"
+                )
+                raise failure
+            return snapshot
+        except PackageNotFoundError:
+            raise CaptainReviewBrowserError("browser_dependency_unavailable") from None
+        finally:
+            self.last_lifecycle["ended_at_utc"] = datetime.now(UTC).isoformat()
+
+    def _acquire(self, event_id: int, executable: Path) -> ReviewPageSnapshot:
         _require_event_id(event_id)
         try:
             from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -377,6 +427,7 @@ class PlaywrightReviewBrowserAcquirer:
                     playwright.chromium,
                     self._profile_directory,
                     headless=True,
+                    executable=executable,
                 )
                 try:
                     page = context.pages[0] if context.pages else context.new_page()
@@ -398,7 +449,10 @@ class PlaywrightReviewBrowserAcquirer:
                     self.last_navigation_diagnostic = result.diagnostic
                     return result.snapshot
                 finally:
-                    context.close()
+                    try:
+                        context.close()
+                    except Exception:
+                        raise CaptainReviewBrowserError("browser_profile_unclean") from None
         except CaptainReviewBrowserError:
             raise
         except PlaywrightTimeoutError:
@@ -808,7 +862,7 @@ def prepare_dedicated_profile(profile_directory: Path) -> Path:
             elif marker_text != _STABLE_PROFILE_MARKER:
                 raise CaptainReviewBrowserError("dedicated_profile_required")
     else:
-        resolved.mkdir(parents=True)
+        resolved.mkdir(parents=True, mode=0o700)
     marker.write_text(_STABLE_PROFILE_MARKER, encoding="utf-8")
     return resolved
 
@@ -822,12 +876,9 @@ def require_dedicated_profile(profile_directory: Path) -> Path:
 
 
 def find_stable_chrome_executable(candidates: Sequence[Path] | None = None) -> Path:
-    """Locate the normally installed stable Chrome executable on Windows."""
+    """Locate exactly one installed stable Chrome; never download or fall back."""
     paths = tuple(candidates) if candidates is not None else _stable_chrome_candidates()
-    for path in paths:
-        if path.is_file():
-            return path.resolve()
-    raise CaptainReviewBrowserError("stable_chrome_unavailable")
+    return discover_chrome(paths)
 
 
 def stable_chrome_login_command(
@@ -840,6 +891,7 @@ def stable_chrome_login_command(
         "--new-window",
         "--no-first-run",
         "--no-default-browser-check",
+        *(("--password-store=gnome-libsecret",) if sys.platform == "linux" else ()),
         FPL_REVIEW_APP_URL,
     )
 
@@ -853,13 +905,17 @@ def open_manual_review_login(
     """Open stable Chrome for manual login without reading browser session state."""
     try:
         executable = chrome_executable or find_stable_chrome_executable()
+        require_keyring()
         profile = prepare_dedicated_profile(profile_directory)
-        process = process_factory(stable_chrome_login_command(executable, profile))
-        print(
-            "Complete FPL Review authentication in the dedicated stable Chrome window, "
-            "verify Projections, then close that window cleanly."
-        )
-        return_code = process.wait()
+        with own_profile(profile):
+            process = process_factory(stable_chrome_login_command(executable, profile))
+            print(
+                "Complete FPL Review authentication in the dedicated stable Chrome window, "
+                "verify Projections, then close that window cleanly."
+            )
+            return_code = process.wait()
+            if return_code != 0:
+                raise CaptainReviewBrowserError("browser_profile_unclean")
     except CaptainReviewBrowserError:
         raise
     except Exception:
@@ -873,23 +929,22 @@ def _launch_stable_chrome_context(
     profile_directory: Path,
     *,
     headless: bool,
+    executable: Path | None = None,
 ) -> Any:
+    options = {"executable_path": str(executable)} if executable is not None else {}
+    if sys.platform == "linux":
+        options["args"] = ["--password-store=gnome-libsecret"]
     return chromium.launch_persistent_context(
         user_data_dir=str(profile_directory),
         channel=PLAYWRIGHT_CHROME_CHANNEL,
         headless=headless,
         viewport={"width": 1440, "height": 1000},
+        **options,
     )
 
 
 def _stable_chrome_candidates() -> tuple[Path, ...]:
-    relative = Path("Google") / "Chrome" / "Application" / "chrome.exe"
-    roots = (
-        os.environ.get("PROGRAMFILES"),
-        os.environ.get("PROGRAMFILES(X86)"),
-        os.environ.get("LOCALAPPDATA"),
-    )
-    return tuple(Path(root) / relative for root in roots if root)
+    return stable_candidates()
 
 
 def _preserve_legacy_chromium_profile(profile_directory: Path) -> None:
@@ -932,7 +987,10 @@ def _require_event_id(event_id: int) -> None:
 
 
 def _require_profile_outside_repository(profile_directory: Path) -> Path:
+    if profile_directory.is_symlink():
+        raise CaptainReviewBrowserError("dedicated_profile_required")
     resolved = profile_directory.expanduser().resolve()
+    reject_personal_profile(resolved)
     repository = Path(__file__).resolve().parents[2]
     if resolved == repository or repository in resolved.parents:
         raise CaptainReviewBrowserError("dedicated_profile_required")
