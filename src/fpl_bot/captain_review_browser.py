@@ -934,6 +934,9 @@ def _launch_stable_chrome_context(
     options = {"executable_path": str(executable)} if executable is not None else {}
     if sys.platform == "linux":
         options["args"] = ["--password-store=gnome-libsecret"]
+        # Playwright defaults otherwise bypass the OS store and Chromium sandbox.
+        options["ignore_default_args"] = ["--password-store=basic", "--use-mock-keychain"]
+        options["chromium_sandbox"] = True
     return chromium.launch_persistent_context(
         user_data_dir=str(profile_directory),
         channel=PLAYWRIGHT_CHROME_CHANNEL,

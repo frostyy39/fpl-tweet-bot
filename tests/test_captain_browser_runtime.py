@@ -137,6 +137,8 @@ def test_linux_command_and_launch_use_secure_backend(tmp_path, monkeypatch):
     )
     assert seen["channel"] == "chrome"
     assert seen["args"] == ["--password-store=gnome-libsecret"]
+    assert seen["ignore_default_args"] == ["--password-store=basic", "--use-mock-keychain"]
+    assert seen["chromium_sandbox"] is True
 
 
 def test_manual_browser_waits_before_releasing(tmp_path, monkeypatch):
