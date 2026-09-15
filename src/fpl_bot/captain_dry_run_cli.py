@@ -73,7 +73,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.source == "review-browser":
             browser_acquirer = PlaywrightReviewBrowserAcquirer(
                 args.review_profile_dir,
-                timeout_seconds=args.timeout,
             )
             browser_source = FplReviewBrowserProjectionSource(
                 browser_acquirer,

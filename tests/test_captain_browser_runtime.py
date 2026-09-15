@@ -141,6 +141,22 @@ def test_linux_command_and_launch_use_secure_backend(tmp_path, monkeypatch):
     assert seen["chromium_sandbox"] is True
 
 
+def test_windows_acquisition_preserves_sandbox_and_os_store(tmp_path, monkeypatch):
+    monkeypatch.setattr(browser.sys, "platform", "win32")
+    executable = tmp_path / "chrome.exe"
+    profile = tmp_path / "captain-profile"
+    seen = {}
+    chrome = SimpleNamespace(launch_persistent_context=lambda **kwargs: seen.update(kwargs))
+    browser._launch_stable_chrome_context(chrome, profile, headless=True, executable=executable)
+    assert seen["executable_path"] == str(executable)
+    assert seen["user_data_dir"] == str(profile)
+    assert seen["channel"] == "chrome"
+    assert seen["headless"] is True
+    assert seen["chromium_sandbox"] is True
+    assert seen["ignore_default_args"] == ["--password-store=basic", "--use-mock-keychain"]
+    assert "args" not in seen
+
+
 def test_manual_browser_waits_before_releasing(tmp_path, monkeypatch):
     monkeypatch.setattr(browser, "require_keyring", lambda: "ready")
     profile = tmp_path / "dedicated"

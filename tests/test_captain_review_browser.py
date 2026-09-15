@@ -739,6 +739,37 @@ def test_authentication_failure_remains_distinct_from_navigation_failure(monkeyp
     assert raised.value.category == "reauthentication_required"
 
 
+@pytest.mark.parametrize("budget,succeeds", [(10000, False), (30000, True)])
+def test_late_projection_transition_requires_two_observations(monkeypatch, budget, succeeds):
+    clock = FakeClock()
+    control = FakeControl()
+    page = FakePage((control,), clock)
+    projections = table(projection_rows(2))
+    calls = 0
+
+    def snapshot(unused):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            # Slow public-DOM enumeration during the initial app transition.
+            clock.advance(17183)
+            return ReviewPageSnapshot(())
+        return projections
+
+    monkeypatch.setattr(review_browser, "_snapshot_page", snapshot)
+    if succeeds:
+        result = wait_for_view(page, clock, timeout_milliseconds=budget)
+        assert result.diagnostic.ready_at_utc is not None
+        assert result.diagnostic.all_required_same_table_at_utc is not None
+        assert calls == 3
+    else:
+        with pytest.raises(_ProjectionViewFailure) as raised:
+            wait_for_view(page, clock, timeout_milliseconds=budget)
+        assert raised.value.diagnostic.all_required_same_table_at_utc is not None
+        assert raised.value.diagnostic.ready_at_utc is None
+    assert control.click_calls == 1
+
+
 def test_readiness_timeout_budget_starts_after_app_load(monkeypatch) -> None:
     empty = ReviewPageSnapshot(())
     clock = FakeClock()
@@ -1147,6 +1178,8 @@ def test_automated_acquisition_uses_compatible_stable_chrome_channel(tmp_path: P
         "channel": PLAYWRIGHT_CHROME_CHANNEL,
         "headless": True,
         "viewport": {"width": 1440, "height": 1000},
+        "ignore_default_args": ["--password-store=basic", "--use-mock-keychain"],
+        "chromium_sandbox": True,
     }
 
 

@@ -1,6 +1,7 @@
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 
 from fpl_bot.captain_dry_run_cli import (
     render_review_identity_diagnostics,
@@ -23,6 +24,39 @@ from fpl_bot.captain_review_browser import (
     ReviewTableStructuralInspection,
 )
 from fpl_bot.models import EventReport, FixtureClassification, FplEvent
+
+
+def test_cli_http_timeout_does_not_override_browser_budget(monkeypatch, tmp_path):
+    from fpl_bot import captain_dry_run_cli as cli
+    from fpl_bot.errors import CaptainReviewBrowserError
+
+    captured = {}
+
+    def client(**kwargs):
+        captured["http"] = kwargs
+        return object()
+
+    def browser(profile, *, timeout_seconds=30.0):
+        captured["browser_timeout"] = timeout_seconds
+        raise CaptainReviewBrowserError("dedicated_profile_required")
+
+    monkeypatch.setattr(cli, "FplApiClient", client)
+    monkeypatch.setattr(cli, "fetch_live_captain_context", lambda client: SimpleNamespace())
+    monkeypatch.setattr(cli, "PlaywrightReviewBrowserAcquirer", browser)
+    assert (
+        cli.main(
+            [
+                "--source",
+                "review-browser",
+                "--review-profile-dir",
+                str(tmp_path),
+                "--timeout",
+                "2",
+            ]
+        )
+        == 1
+    )
+    assert captured == {"http": {"timeout_seconds": 2.0}, "browser_timeout": 30.0}
 
 
 def test_identity_diagnostic_output_has_only_allowlisted_public_fields() -> None:
