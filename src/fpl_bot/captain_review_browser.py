@@ -26,6 +26,7 @@ from fpl_bot.captain_browser_runtime import (
     stable_candidates,
 )
 from fpl_bot.captain_models import CaptainProjection
+from fpl_bot.captain_session_health import AuthenticationStatus, SessionObservation
 from fpl_bot.errors import CaptainReviewBrowserError
 from fpl_bot.models import FplPlayer, Team
 
@@ -366,13 +367,28 @@ class FplReviewBrowserProjectionSource:
 class PlaywrightReviewBrowserAcquirer:
     """Freshly load Review in an isolated persistent Chromium profile."""
 
-    def __init__(self, profile_directory: Path, *, timeout_seconds: float = 30.0) -> None:
+    def __init__(
+        self,
+        profile_directory: Path,
+        *,
+        timeout_seconds: float = 30.0,
+        session_observer: Callable[[SessionObservation], None] | None = None,
+    ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be greater than zero")
         self._profile_directory = require_dedicated_profile(profile_directory)
         self._timeout_milliseconds = int(timeout_seconds * 1000)
         self.last_navigation_diagnostic: ReviewNavigationDiagnostic | None = None
         self.last_lifecycle: dict[str, str] = {}
+        self._session_observer = session_observer
+
+    def _observe_session(self, authentication: AuthenticationStatus) -> None:
+        if self._session_observer is not None:
+            # Public readiness evidence only. No expiry/renewal inference or secret APIs.
+            try:
+                self._session_observer(SessionObservation(datetime.now(UTC), authentication))
+            except Exception:
+                raise CaptainReviewBrowserError("session_observation_failed") from None
 
     def acquire(self, event_id: int) -> ReviewPageSnapshot:
         self.last_lifecycle = {
@@ -436,6 +452,7 @@ class PlaywrightReviewBrowserAcquirer:
                         wait_until="domcontentloaded",
                         timeout=self._timeout_milliseconds,
                     )
+                    self._observe_session(AuthenticationStatus.NOT_CONFIRMED)
                     try:
                         result = _wait_for_projections_view(
                             page,
@@ -445,8 +462,11 @@ class PlaywrightReviewBrowserAcquirer:
                         )
                     except _ProjectionViewFailure as exc:
                         self.last_navigation_diagnostic = exc.diagnostic
+                        if exc.category == "reauthentication_required":
+                            self._observe_session(AuthenticationStatus.REQUIRED)
                         raise CaptainReviewBrowserError(exc.category) from None
                     self.last_navigation_diagnostic = result.diagnostic
+                    self._observe_session(AuthenticationStatus.AUTHENTICATED)
                     return result.snapshot
                 finally:
                     try:

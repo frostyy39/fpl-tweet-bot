@@ -193,7 +193,8 @@ def test_runtime_has_no_secret_or_production_apis():
         assert forbidden not in source
 
 
-def test_acquisition_closes_before_ownership_release(tmp_path, monkeypatch):
+@pytest.mark.parametrize("observer_failure", [False, True])
+def test_acquisition_closes_before_ownership_release(tmp_path, monkeypatch, observer_failure):
     import sys
 
     profile = browser.prepare_dedicated_profile(tmp_path / "profile")
@@ -229,8 +230,22 @@ def test_acquisition_closes_before_ownership_release(tmp_path, monkeypatch):
         "_wait_for_projections_view",
         lambda *a, **k: SimpleNamespace(snapshot=snapshot, diagnostic=None),
     )
-    acquirer = browser.PlaywrightReviewBrowserAcquirer(profile)
-    assert acquirer.acquire(4) is snapshot
+    observations = []
+
+    def observe(value):
+        assert not events  # Observation happens in the already-open browser session.
+        observations.append(value)
+        if observer_failure:
+            raise ValueError("metadata observer failed")
+
+    acquirer = browser.PlaywrightReviewBrowserAcquirer(profile, session_observer=observe)
+    if observer_failure:
+        with pytest.raises(CaptainReviewBrowserError):
+            acquirer.acquire(4)
+    else:
+        assert acquirer.acquire(4) is snapshot
+        assert [o.authentication.value for o in observations] == ["not_confirmed", "authenticated"]
+        assert all(o.expiry_kind.value == "unknown" for o in observations)
     assert events == ["closed"]
     assert not (profile / runtime.OWNERSHIP_FILE).exists()
     assert acquirer.last_lifecycle["ownership"] == "released"
