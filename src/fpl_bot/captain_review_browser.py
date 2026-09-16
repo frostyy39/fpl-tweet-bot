@@ -632,6 +632,24 @@ def _resolve_canonical_projection_table(
     *,
     acquired_at_utc: datetime,
 ) -> tuple[tuple[CaptainProjection, ...], ReviewIdentityDiagnosticSummary]:
+    return resolve_review_rows(
+        canonical.rows,
+        players,
+        teams,
+        event_id=canonical.event_id,
+        acquired_at_utc=acquired_at_utc,
+    )
+
+
+def resolve_review_rows(
+    rows: Sequence[ReviewLogicalProjectionRow],
+    players: Sequence[FplPlayer],
+    teams: Sequence[Team],
+    *,
+    event_id: int,
+    acquired_at_utc: datetime,
+) -> tuple[tuple[CaptainProjection, ...], ReviewIdentityDiagnosticSummary]:
+    """Pure exact identity resolution shared by browser diagnostics and cloud validation."""
     if acquired_at_utc.tzinfo is None or acquired_at_utc.utcoffset() is None:
         raise CaptainReviewBrowserError("invalid_projection_table")
     team_by_id = {team.team_id: team for team in teams}
@@ -649,7 +667,7 @@ def _resolve_canonical_projection_table(
     diagnostics: list[ReviewIdentityDiagnostic] = []
     projections: list[CaptainProjection] = []
     resolved_ids: set[int] = set()
-    for row in canonical.rows:
+    for row in rows:
         normalized_name = _normalize_name(row.display_name)
         normalized_team = row.team_short_code.strip().upper()
         name_matches = tuple(
@@ -691,10 +709,10 @@ def _resolve_canonical_projection_table(
         )
 
     summary = ReviewIdentityDiagnosticSummary(
-        event_id=canonical.event_id,
-        matched_gameweek_column=canonical.matched_gameweek_column,
+        event_id=event_id,
+        matched_gameweek_column=f"GW{event_id}",
         acquired_at_utc=acquired_at_utc.astimezone(UTC),
-        total_projection_rows=len(canonical.rows),
+        total_projection_rows=len(rows),
         resolved_candidate_count=len(projections),
         failures=tuple(diagnostics),
     )
