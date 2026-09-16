@@ -39,9 +39,14 @@ from fpl_bot.captain_state import (
 )
 
 
-@pytest.fixture
-def setup():
-    repository = InMemoryCaptainRepository()
+@pytest.fixture(params=["memory", "firestore"])
+def setup(request):
+    if request.param == "firestore":
+        from test_captain_firestore import adapters
+
+        repository = adapters()[0]
+    else:
+        repository = InMemoryCaptainRepository()
     assignment = CaptainAssignment(
         UUID(int=1), UUID(int=2), 5, "GW5", CaptainTiming(datetime(2026, 9, 18, 17, 30, tzinfo=UTC))
     )
