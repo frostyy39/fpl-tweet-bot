@@ -1,7 +1,10 @@
 from copy import deepcopy
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import UUID
+
+import pytest
 
 from fpl_bot.captain_controller import CaptainController, TaskEnvelope
 from fpl_bot.captain_http import (
@@ -11,8 +14,10 @@ from fpl_bot.captain_http import (
     create_captain_app,
 )
 from fpl_bot.captain_memory_repository import InMemoryCaptainRepository
-from fpl_bot.captain_state import GenerationStatus, PostKey, TaskKind
+from fpl_bot.captain_orchestration_timing import CaptainTiming
+from fpl_bot.captain_state import GenerationStatus, PostKey, StateConflict, TaskKind
 from fpl_bot.captain_vm_operations import InMemoryVmOperations
+from fpl_bot.captain_worker import ReleaseGrant, WorkerAssignment
 
 D = datetime(2026, 9, 18, 17, 30, tzinfo=UTC)
 
@@ -206,3 +211,88 @@ def test_publish_candidate_handler_uses_envelope_assignment():
         "event_code": "GW5",
         "weighted_length": 204,
     }
+
+
+def release_setup():
+    controller, service, _, _, generation, clock = setup()
+    clock.value = generation.assignment.timing.target_utc
+    repo = controller.repository
+    gid = generation.assignment.generation_id
+    repo.transition(gid, GenerationStatus.WARMING, GenerationStatus.READY, clock.value)
+    repo.transition(gid, GenerationStatus.READY, GenerationStatus.RELEASED, clock.value)
+    return service, repo, clock, WorkerAssignment(1, generation.assignment, UUID(int=99))
+
+
+@pytest.mark.parametrize("offset,expected", [(-1, None), (0, True), (300, True), (301, False)])
+def test_release_fresh_authority_and_exact_window(offset, expected):
+    service, repo, clock, work = release_setup()
+    clock.value = work.assignment.timing.target_utc + timedelta(seconds=offset)
+    result = service.release(work, work.attempt_id)
+    if expected is True:
+        assert isinstance(result, ReleaseGrant)
+        assert repo.generation_acquisition(work.assignment.generation_id) is not None
+    else:
+        assert result is expected
+        assert repo.generation_acquisition(work.assignment.generation_id) is None
+
+
+@pytest.mark.parametrize("fault", ["deadline", "event", "fetch", "chronology"])
+def test_authoritative_release_rejections_never_call_claim(fault):
+    service, repo, _, work = release_setup()
+    if fault == "deadline":
+        service.source.bootstrap["events"][0]["deadline_time"] = (
+            D + timedelta(hours=1)
+        ).isoformat()
+    elif fault == "event":
+        service.source.bootstrap["events"][0]["id"] = 6
+    elif fault == "fetch":
+        service.source.fetch_bootstrap_static = lambda: (_ for _ in ()).throw(TimeoutError())
+    else:
+        service.source.bootstrap["events"].append(
+            {
+                "id": 4,
+                "name": "Gameweek 4",
+                "deadline_time": (D - timedelta(minutes=30)).isoformat(),
+            }
+        )
+    repo.claim_acquisition = lambda *args: (_ for _ in ()).throw(AssertionError("claim called"))
+    assert service.release(work, work.attempt_id) is False
+    assert repo.generation_acquisition(work.assignment.generation_id) is None
+
+
+def test_duplicate_release_preserves_one_atomic_attempt():
+    service, repo, _, work = release_setup()
+    first = service.release(work, work.attempt_id)
+    assert service.release(work, work.attempt_id) == first
+    other = replace(work, attempt_id=UUID(int=100))
+    assert service.release(other, other.attempt_id) is False
+    assert repo.generation_acquisition(work.assignment.generation_id).attempt_id == work.attempt_id
+
+
+@pytest.mark.parametrize("during_claim", [False, True])
+def test_generation_supersession_fences_release_including_validation_claim_race(during_claim):
+    service, repo, clock, work = release_setup()
+    new = replace(
+        work.assignment,
+        assignment_id=UUID(int=101),
+        generation_id=UUID(int=102),
+        timing=CaptainTiming(D + timedelta(hours=1)),
+    )
+    original = repo.claim_acquisition
+
+    def supersede():
+        repo.plan(PostKey("12345", 5), new, work.assignment.generation_id, clock.value)
+
+    if during_claim:
+
+        def claim(*args):
+            supersede()
+            return original(*args)
+
+        repo.claim_acquisition = claim
+        with pytest.raises(StateConflict):
+            service.release(work, work.attempt_id)
+    else:
+        supersede()
+        assert service.release(work, work.attempt_id) is False
+    assert repo.generation_acquisition(work.assignment.generation_id) is None

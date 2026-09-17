@@ -107,6 +107,18 @@ class WorkerControllerService:
     def release(self, work: WorkerAssignment, run_id: UUID):
         if work.attempt_id != run_id:
             raise StateConflict("worker run identity mismatch")
+        # External authoritative validation is deliberately outside the later
+        # atomic claim. The claim rechecks current generation/attempt state.
+        try:
+            events = parse_events(self.source.fetch_bootstrap_static()["events"])
+            event = select_next_event(events, self._now())
+        except (FplBotError, KeyError, TypeError, ValueError, OSError):
+            return False
+        if (
+            event.event_id != work.assignment.event_id
+            or event.deadline_utc != work.assignment.timing.deadline_utc
+        ):
+            return False
         generation = self.repository.current(
             PostKey(self.destination_user_id, work.assignment.event_id)
         )
@@ -124,6 +136,11 @@ class WorkerControllerService:
             return ReleaseGrant(work, run_id, attempt.claimed_at)
         attempt = self.repository.generation_acquisition(work.assignment.generation_id)
         if attempt and attempt.attempt_id == run_id:
+            # Replays must also pass the atomic current-generation precondition;
+            # a concurrent supersession cannot revive an existing claim.
+            attempt = self.repository.claim_acquisition(
+                work.assignment.generation_id, work.attempt_id, now
+            ).record
             return ReleaseGrant(work, run_id, attempt.claimed_at)
         return False
 
