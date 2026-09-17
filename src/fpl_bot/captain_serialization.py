@@ -233,9 +233,17 @@ def _decode(data):
     if set(data) != expected:
         raise ValueError("unknown fields")
     cls = RECORDS[data["record"]]
-    if type(data["fields"]) is not dict or set(data["fields"]) != {f.name for f in fields(cls)}:
+    if type(data["fields"]) is not dict:
         raise ValueError("record fields")
-    value = cls(**{k: _decode(v) for k, v in data["fields"].items()})
+    expected = {f.name for f in fields(cls)}
+    field_data = dict(data["fields"])
+    # Milestone 6 VM-operation documents predate provider operation IDs. They
+    # remain valid records; the new field is optional reconciliation evidence.
+    if cls is VmOperation and set(field_data) == expected - {"provider_operation_id"}:
+        field_data["provider_operation_id"] = None
+    if set(field_data) != expected:
+        raise ValueError("record fields")
+    value = cls(**{k: _decode(v) for k, v in field_data.items()})
     _validate(value)
     return value
 
@@ -257,7 +265,12 @@ def from_document(data):
         if type(data["schema_version"]) is not int or data["schema_version"] != 1:
             raise ValueError("schema version")
         value = _decode(data["value"])
-        if to_document(value) != data:
+        canonical = to_document(value)
+        if isinstance(value, VmOperation) and "provider_operation_id" not in data["value"].get(
+            "fields", {}
+        ):
+            canonical["value"]["fields"].pop("provider_operation_id", None)
+        if canonical != data:
             raise ValueError("noncanonical or inconsistent document")
         return value
     except (ValueError, TypeError, KeyError, AttributeError, ArithmeticError, RecursionError):

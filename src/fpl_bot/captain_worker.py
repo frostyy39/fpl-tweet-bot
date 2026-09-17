@@ -283,8 +283,13 @@ class CaptainWorker:
             return fail(WorkerStatus.EXPIRED, handoff, health)
         try:
             receipt = self.client.submit_handoff(handoff, handoff.payload_digest, health)
-        except Exception:
+        except Exception as error:
             # The server may have accepted it. No acquisition or changed-payload retry.
+            if getattr(error, "category", "") in {
+                "handoff_rejected",
+                "controller_state_conflict",
+            }:
+                return fail(WorkerStatus.HANDOFF_REJECTED, handoff, health)
             return fail(WorkerStatus.HANDOFF_UNCERTAIN, handoff, health)
         if (
             not isinstance(receipt, HandoffReceipt)

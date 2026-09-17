@@ -28,6 +28,7 @@ class VmOperation:
     action: VmAction
     phase: OperationPhase = OperationPhase.REQUESTED
     terminated_confirmed: bool = False
+    provider_operation_id: str | None = None
 
     def __post_init__(self) -> None:
         identity(self.lease_id)
@@ -36,6 +37,14 @@ class VmOperation:
             not isinstance(self.action, VmAction)
             or not isinstance(self.phase, OperationPhase)
             or type(self.terminated_confirmed) is not bool
+            or (
+                self.provider_operation_id is not None
+                and (
+                    not isinstance(self.provider_operation_id, str)
+                    or not self.provider_operation_id
+                    or len(self.provider_operation_id) > 256
+                )
+            )
         ):
             raise StateConflict("invalid VM operation record")
         if self.terminated_confirmed != (
@@ -58,7 +67,9 @@ class VmOperationRepository(Protocol):
 
     def request(self, lease: VmUseLease, action: VmAction) -> Mutation[VmOperation]: ...
     def get(self, lease_id: UUID, action: VmAction) -> VmOperation | None: ...
-    def acknowledge(self, lease_id: UUID, action: VmAction) -> Mutation[VmOperation]: ...
+    def acknowledge(
+        self, lease_id: UUID, action: VmAction, provider_operation_id: str | None = None
+    ) -> Mutation[VmOperation]: ...
     def finish(
         self, lease_id: UUID, action: VmAction, *, succeeded: bool, terminated: bool = False
     ) -> Mutation[VmOperation]: ...
@@ -114,14 +125,26 @@ class InMemoryVmOperations:
         start = self._operations.get((lease_id, VmAction.START))
         return start is None or start.phase in {OperationPhase.COMPLETED, OperationPhase.FAILED}
 
-    def acknowledge(self, lease_id: UUID, action: VmAction) -> Mutation[VmOperation]:
+    def acknowledge(
+        self, lease_id: UUID, action: VmAction, provider_operation_id: str | None = None
+    ) -> Mutation[VmOperation]:
         with self._lock:
             old = self._require(lease_id, action)
             if old.phase != OperationPhase.REQUESTED:
                 return Mutation(old, False)
             if action == VmAction.STOP and not self._start_settled(lease_id):
                 raise StateConflict("VM start still outstanding")
-            result = replace(old, phase=OperationPhase.IN_PROGRESS)
+            if provider_operation_id is not None and (
+                not isinstance(provider_operation_id, str)
+                or not provider_operation_id
+                or len(provider_operation_id) > 256
+            ):
+                raise StateConflict("invalid provider operation identity")
+            result = replace(
+                old,
+                phase=OperationPhase.IN_PROGRESS,
+                provider_operation_id=provider_operation_id,
+            )
             self._operations[lease_id, action] = result
             return Mutation(result, True)
 
