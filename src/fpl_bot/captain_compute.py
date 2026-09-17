@@ -2,8 +2,11 @@
 
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from types import SimpleNamespace
+from urllib.parse import quote
+from uuid import UUID, uuid5
 
 from google.api_core.exceptions import (
     FailedPrecondition,
@@ -14,8 +17,15 @@ from google.api_core.exceptions import (
 )
 
 from fpl_bot.captain_repository import CaptainVmLeaseRepository
-from fpl_bot.captain_state import StateConflict, VmPhase
-from fpl_bot.captain_vm_operations import OperationPhase, VmAction, VmOperationRepository
+from fpl_bot.captain_state import StateConflict
+from fpl_bot.captain_vm_operations import (
+    DispatchStatus,
+    OperationPhase,
+    VmAction,
+    VmOperationRepository,
+)
+
+_DISPATCH_NAMESPACE = UUID("7f61c738-9bc6-4dc6-a9e3-f09e41ba5ffd")
 
 
 class ProviderResult(StrEnum):
@@ -52,6 +62,7 @@ class InstanceEvidence:
 class ComputeOperationReceipt:
     operation_name: str | None
     result: ProviderResult
+    instance: InstanceEvidence | None = None
 
 
 class CaptainComputeError(RuntimeError):
@@ -61,7 +72,12 @@ class CaptainComputeError(RuntimeError):
 
 
 class CaptainComputeAdapter:
-    """The injected clients expose get/start/stop and operation get; target is immutable."""
+    """Fixed-target Compute API; requestId supplements durable dispatch fencing.
+
+    Compute operation records are retained for a limited period. Absence of an
+    operation with the stored clientOperationId is therefore not proof that a
+    request was never sent: that state remains ambiguous and is not reissued.
+    """
 
     def __init__(self, target: ComputeTarget, instances, zone_operations):
         self.target, self.instances, self.zone_operations = target, instances, zone_operations
@@ -93,46 +109,91 @@ class CaptainComputeAdapter:
             raise CaptainComputeError("vm_identity_mismatch")
         return InstanceEvidence(item.name, str(getattr(item, "id", "")), str(item.status))
 
-    def request(self, action: VmAction) -> ComputeOperationReceipt:
-        if not isinstance(action, VmAction):
+    def request(self, action: VmAction, request_id: UUID) -> ComputeOperationReceipt:
+        if (
+            not isinstance(action, VmAction)
+            or not isinstance(request_id, UUID)
+            or not request_id.int
+        ):
             raise CaptainComputeError("invalid_vm_action")
-        state = self.inspect().status.upper()
+        evidence = self.inspect()
+        state = evidence.status.upper()
         if action == VmAction.START and state == "RUNNING":
-            return ComputeOperationReceipt(None, ProviderResult.COMPLETE)
+            return ComputeOperationReceipt(None, ProviderResult.COMPLETE, evidence)
         if action == VmAction.STOP and state == "TERMINATED":
-            return ComputeOperationReceipt(None, ProviderResult.COMPLETE)
+            return ComputeOperationReceipt(None, ProviderResult.COMPLETE, evidence)
         method = self.instances.start if action == VmAction.START else self.instances.stop
         try:
             op = method(
-                project=self.target.project, zone=self.target.zone, instance=self.target.instance
+                project=self.target.project,
+                zone=self.target.zone,
+                instance=self.target.instance,
+                request_id=str(request_id),
             )
         except (PermissionDenied, Unauthenticated, InvalidArgument, FailedPrecondition) as exc:
             raise CaptainComputeError(f"vm_{action.value}_rejected") from exc
         except Exception as exc:
             raise CaptainComputeError(f"vm_{action.value}_ambiguous") from exc
         name = getattr(op, "name", None)
-        if not isinstance(name, str) or not name:
+        if (
+            not isinstance(name, str)
+            or not name
+            or getattr(op, "clientOperationId", None) != str(request_id)
+            or getattr(op, "operationType", None) != action.value
+            or not str(getattr(op, "targetLink", "")).endswith(
+                f"/zones/{self.target.zone}/instances/{self.target.instance}"
+            )
+        ):
             raise CaptainComputeError(f"vm_{action.value}_ambiguous")
         return ComputeOperationReceipt(name, ProviderResult.PENDING)
 
-    def reconcile(self, action: VmAction, operation_name: str | None) -> ProviderResult:
+    def reconcile(
+        self, action: VmAction, operation_name: str | None, request_id: UUID
+    ) -> ComputeOperationReceipt:
         desired = "RUNNING" if action == VmAction.START else "TERMINATED"
-        if operation_name:
-            try:
+        try:
+            if operation_name:
                 op = self.zone_operations.get(
                     project=self.target.project, zone=self.target.zone, operation=operation_name
                 )
-            except Exception:
-                return ProviderResult.AMBIGUOUS
-            if str(getattr(op, "status", "")).upper() != "DONE":
-                return ProviderResult.PENDING
-            if getattr(op, "error", None):
-                return ProviderResult.FAILED
-        return (
+            else:
+                matches = self.zone_operations.find_by_request_id(
+                    project=self.target.project,
+                    zone=self.target.zone,
+                    request_id=str(request_id),
+                )
+                if len(matches) != 1:
+                    return ComputeOperationReceipt(None, ProviderResult.AMBIGUOUS)
+                op = matches[0]
+        except Exception:
+            return ComputeOperationReceipt(operation_name, ProviderResult.AMBIGUOUS)
+        name = getattr(op, "name", None)
+        if (
+            not isinstance(name, str)
+            or not name
+            or getattr(op, "clientOperationId", None) != str(request_id)
+            or getattr(op, "operationType", None) != action.value
+            or not str(getattr(op, "targetLink", "")).endswith(
+                f"/zones/{self.target.zone}/instances/{self.target.instance}"
+            )
+        ):
+            return ComputeOperationReceipt(operation_name, ProviderResult.AMBIGUOUS)
+        if str(getattr(op, "status", "")).upper() != "DONE":
+            return ComputeOperationReceipt(name, ProviderResult.PENDING)
+        if getattr(op, "error", None):
+            return ComputeOperationReceipt(name, ProviderResult.FAILED)
+        try:
+            evidence = self.inspect()
+        except CaptainComputeError:
+            return ComputeOperationReceipt(name, ProviderResult.AMBIGUOUS)
+        if str(getattr(op, "targetId", "")) != evidence.instance_id:
+            return ComputeOperationReceipt(name, ProviderResult.AMBIGUOUS)
+        result = (
             ProviderResult.COMPLETE
-            if self.inspect().status.upper() == desired
+            if evidence.status.upper() == desired
             else ProviderResult.PENDING
         )
+        return ComputeOperationReceipt(name, result, evidence)
 
 
 class _RestInstances:
@@ -151,14 +212,18 @@ class _RestInstances:
             raise NotFound("compute instance unavailable")
         return SimpleNamespace(**response.json())
 
-    def start(self, **kwargs):
-        response = self.session.post(self._url(**kwargs, suffix="/start"), timeout=10)
+    def start(self, request_id, **kwargs):
+        response = self.session.post(
+            self._url(**kwargs, suffix="/start"), params={"requestId": request_id}, timeout=10
+        )
         if response.status_code >= 400:
             raise RuntimeError("compute start rejected")
         return SimpleNamespace(**response.json())
 
-    def stop(self, **kwargs):
-        response = self.session.post(self._url(**kwargs, suffix="/stop"), timeout=10)
+    def stop(self, request_id, **kwargs):
+        response = self.session.post(
+            self._url(**kwargs, suffix="/stop"), params={"requestId": request_id}, timeout=10
+        )
         if response.status_code >= 400:
             raise RuntimeError("compute stop rejected")
         return SimpleNamespace(**response.json())
@@ -178,30 +243,102 @@ class _RestZoneOperations:
             raise RuntimeError("compute operation lookup failed")
         return SimpleNamespace(**response.json())
 
+    def find_by_request_id(self, *, project, zone, request_id):
+        filter_value = quote(f'clientOperationId = "{request_id}"')
+        url = (
+            f"https://compute.googleapis.com/compute/v1/projects/{project}/zones/{zone}/operations"
+            f"?filter={filter_value}&maxResults=2"
+        )
+        response = self.session.get(url, timeout=10)
+        if response.status_code >= 400:
+            raise RuntimeError("compute operation lookup failed")
+        body = response.json()
+        if body.get("nextPageToken"):
+            raise RuntimeError("compute operation lookup ambiguous")
+        return tuple(SimpleNamespace(**item) for item in body.get("items", ()))
+
 
 class CaptainComputeReconciler:
     """External calls happen after durable request records and remain lease fenced."""
 
     def __init__(
-        self, leases: CaptainVmLeaseRepository, operations: VmOperationRepository, provider
+        self,
+        leases: CaptainVmLeaseRepository,
+        operations: VmOperationRepository,
+        provider,
+        clock=lambda: datetime.now(UTC),
     ):
         self.leases, self.operations, self.provider = leases, operations, provider
+        self.clock = clock
+
+    @staticmethod
+    def _identities(lease_id, action):
+        logical = f"{lease_id}:{action.value}"
+        return (
+            uuid5(_DISPATCH_NAMESPACE, f"reservation:{logical}"),
+            uuid5(_DISPATCH_NAMESPACE, f"compute-request:{logical}"),
+        )
+
+    def _record(self, operation, receipt):
+        dispatch = operation.dispatch
+        if dispatch is None:
+            raise StateConflict("VM provider dispatch is not reserved")
+        now = self.clock()
+        evidence = receipt.instance
+        common = {
+            "provider_operation_id": receipt.operation_name,
+            "instance_id": evidence.instance_id if evidence else None,
+            "instance_status": evidence.status.upper() if evidence else None,
+        }
+        if receipt.result == ProviderResult.COMPLETE:
+            status, failure = DispatchStatus.COMPLETED, None
+        elif receipt.result == ProviderResult.PENDING:
+            status, failure = DispatchStatus.ACKNOWLEDGED, None
+        elif receipt.result == ProviderResult.FAILED:
+            status, failure = DispatchStatus.FAILED, "provider_failed"
+        else:
+            status, failure = DispatchStatus.AMBIGUOUS, "provider_ambiguous"
+        return self.operations.record_dispatch(
+            operation.lease_id,
+            operation.action,
+            dispatch.reservation_id,
+            status,
+            now,
+            failure_category=failure,
+            terminated=operation.action == VmAction.STOP and status == DispatchStatus.COMPLETED,
+            **common,
+        ).record
 
     def submit(self, lease_id, action: VmAction) -> ProviderResult:
-        lease = self.leases.vm_use()
         operation = self.operations.get(lease_id, action)
-        if lease is None or operation is None or lease.lease_id != lease_id:
+        if operation is None:
             raise StateConflict("stale VM provider operation")
-        if lease.generation_id != operation.generation_id:
-            raise StateConflict("VM operation generation mismatch")
-        if action == VmAction.STOP and lease.phase != VmPhase.STOPPING:
-            raise StateConflict("stop is not cleanup fenced")
-        receipt = self.provider.request(action)
-        self.operations.acknowledge(lease_id, action, receipt.operation_name)
-        if receipt.result == ProviderResult.COMPLETE:
-            self.operations.finish(
-                lease_id, action, succeeded=True, terminated=action == VmAction.STOP
+        reservation_id, request_id = self._identities(lease_id, action)
+        reserved = self.operations.reserve_dispatch(
+            lease_id,
+            operation.generation_id,
+            action,
+            reservation_id,
+            request_id,
+            self.clock(),
+        )
+        operation = reserved.record
+        if not reserved.applied:
+            return self.reconcile(lease_id, action)
+        try:
+            receipt = self.provider.request(action, request_id)
+        except CaptainComputeError as exc:
+            ambiguous = exc.category.endswith("_ambiguous")
+            self.operations.record_dispatch(
+                lease_id,
+                action,
+                reservation_id,
+                DispatchStatus.AMBIGUOUS if ambiguous else DispatchStatus.FAILED,
+                self.clock(),
+                failure_category="provider_ambiguous" if ambiguous else "provider_rejected",
             )
+            return ProviderResult.AMBIGUOUS if ambiguous else ProviderResult.FAILED
+        self._record(operation, receipt)
         return receipt.result
 
     def reconcile(self, lease_id, action: VmAction) -> ProviderResult:
@@ -212,14 +349,20 @@ class CaptainComputeReconciler:
             return ProviderResult.COMPLETE
         if operation.phase == OperationPhase.FAILED:
             return ProviderResult.FAILED
-        result = self.provider.reconcile(action, operation.provider_operation_id)
-        if operation.phase == OperationPhase.REQUESTED and result == ProviderResult.COMPLETE:
-            operation = self.operations.acknowledge(lease_id, action).record
-        if result in {ProviderResult.COMPLETE, ProviderResult.FAILED}:
-            self.operations.finish(
-                lease_id,
-                action,
-                succeeded=result == ProviderResult.COMPLETE,
-                terminated=action == VmAction.STOP and result == ProviderResult.COMPLETE,
-            )
-        return result
+        dispatch = operation.dispatch
+        if dispatch is None:
+            raise StateConflict("legacy VM dispatch requires operator reconciliation")
+        # This re-validates the exact current owner/fence before provider lookup.
+        self.operations.reserve_dispatch(
+            lease_id,
+            operation.generation_id,
+            action,
+            dispatch.reservation_id,
+            dispatch.request_id,
+            self.clock(),
+        )
+        receipt = self.provider.reconcile(
+            action, dispatch.provider_operation_id, dispatch.request_id
+        )
+        self._record(operation, receipt)
+        return receipt.result

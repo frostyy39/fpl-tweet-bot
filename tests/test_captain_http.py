@@ -1,8 +1,9 @@
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from uuid import UUID
 
-from fpl_bot.captain_controller import CaptainController
+from fpl_bot.captain_controller import CaptainController, TaskEnvelope
 from fpl_bot.captain_http import (
     CallerIdentity,
     CaptainAuthConfig,
@@ -10,7 +11,7 @@ from fpl_bot.captain_http import (
     create_captain_app,
 )
 from fpl_bot.captain_memory_repository import InMemoryCaptainRepository
-from fpl_bot.captain_state import GenerationStatus, TaskKind
+from fpl_bot.captain_state import GenerationStatus, PostKey, TaskKind
 from fpl_bot.captain_vm_operations import InMemoryVmOperations
 
 D = datetime(2026, 9, 18, 17, 30, tzinfo=UTC)
@@ -152,3 +153,56 @@ def test_config_requires_separate_worker_and_task_identities():
         assert "distinct" in str(error)
     else:
         raise AssertionError("shared identity accepted")
+
+
+def test_publish_candidate_handler_uses_envelope_assignment():
+    controller, service, authorizer, _, generation, _ = setup()
+    handoff = object()
+    controller.deliver = lambda envelope: SimpleNamespace(status="publish_eligible_no_write")
+    controller.repository.generation = lambda generation_id: generation
+    controller.repository.generation_acquisition = lambda generation_id: SimpleNamespace(
+        handoff=handoff
+    )
+
+    class Validator:
+        def validate(self, key, received):
+            assert key == generation.key and received is handoff
+            return SimpleNamespace(
+                key=PostKey("12345", 5),
+                assignment=generation.assignment,
+                weighted_length=204,
+            )
+
+    auth = CaptainAuthConfig(
+        "https://captain.invalid/worker",
+        "https://captain.invalid/tasks",
+        "worker@captain.invalid",
+        "tasks@captain.invalid",
+    )
+    app = create_captain_app(service, controller, authorizer, auth, candidate_validator=Validator())
+    envelope = TaskEnvelope(
+        "12345",
+        generation.assignment,
+        TaskKind.PUBLISH,
+        generation.assignment.timing.target_utc,
+    )
+    response = app.test_client().post(
+        "/captain/tasks/publish",
+        json={
+            "version": 1,
+            "identity": envelope.identity,
+            "digest": envelope.digest,
+            "destination_user_id": envelope.destination_user_id,
+            "assignment": envelope.assignment.to_payload(),
+            "kind": envelope.kind.value,
+            "scheduled_at": envelope.scheduled_at.isoformat().replace("+00:00", "Z"),
+        },
+        headers={"Authorization": "Bearer opaque"},
+    )
+    assert response.status_code == 200
+    assert response.json == {
+        "status": "validated_candidate",
+        "event_id": 5,
+        "event_code": "GW5",
+        "weighted_length": 204,
+    }

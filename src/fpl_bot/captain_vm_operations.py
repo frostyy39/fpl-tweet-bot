@@ -1,11 +1,13 @@
 """Durable VM-operation contract and local reference ledger; no VM API calls."""
 
 from dataclasses import dataclass, replace
+from datetime import datetime
 from enum import StrEnum
 from threading import RLock
 from typing import Protocol
 from uuid import UUID
 
+from fpl_bot.captain_orchestration_timing import require_utc
 from fpl_bot.captain_state import Mutation, StateConflict, VmPhase, VmUseLease, identity
 
 
@@ -21,6 +23,91 @@ class OperationPhase(StrEnum):
     FAILED = "failed"
 
 
+class DispatchStatus(StrEnum):
+    RESERVED = "reserved"
+    ACKNOWLEDGED = "acknowledged"
+    AMBIGUOUS = "ambiguous"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class DispatchPending(StateConflict):
+    """An unresolved opposite operation must settle before dispatch."""
+
+
+@dataclass(frozen=True, slots=True)
+class VmDispatchReservation:
+    reservation_id: UUID
+    request_id: UUID
+    lease_id: UUID
+    generation_id: UUID
+    action: VmAction
+    reserved_at: datetime
+    updated_at: datetime
+    status: DispatchStatus = DispatchStatus.RESERVED
+    provider_operation_id: str | None = None
+    instance_id: str | None = None
+    instance_status: str | None = None
+    failure_category: str | None = None
+
+    def __post_init__(self):
+        for value in (self.reservation_id, self.request_id, self.lease_id, self.generation_id):
+            identity(value)
+        require_utc(self.reserved_at)
+        require_utc(self.updated_at)
+        if self.updated_at < self.reserved_at or not isinstance(self.action, VmAction):
+            raise StateConflict("invalid dispatch chronology/type")
+        if not isinstance(self.status, DispatchStatus):
+            raise StateConflict("invalid dispatch status")
+        if self.provider_operation_id is not None and (
+            not isinstance(self.provider_operation_id, str)
+            or not self.provider_operation_id
+            or len(self.provider_operation_id) > 256
+        ):
+            raise StateConflict("invalid dispatch provider identity")
+        if self.instance_id is not None and (
+            not isinstance(self.instance_id, str)
+            or not self.instance_id
+            or len(self.instance_id) > 64
+        ):
+            raise StateConflict("invalid dispatch instance identity")
+        if self.instance_status is not None and (
+            not isinstance(self.instance_status, str)
+            or not self.instance_status
+            or len(self.instance_status) > 32
+        ):
+            raise StateConflict("invalid dispatch instance status")
+        if self.failure_category not in {
+            None,
+            "provider_rejected",
+            "provider_ambiguous",
+            "provider_failed",
+        }:
+            raise StateConflict("invalid dispatch failure category")
+        if (
+            self.status
+            in {DispatchStatus.RESERVED, DispatchStatus.ACKNOWLEDGED, DispatchStatus.COMPLETED}
+            and self.failure_category is not None
+        ):
+            raise StateConflict("inconsistent dispatch evidence")
+        if self.status == DispatchStatus.ACKNOWLEDGED and self.provider_operation_id is None:
+            raise StateConflict("acknowledged dispatch lacks provider identity")
+        if (
+            self.status == DispatchStatus.AMBIGUOUS
+            and self.failure_category != "provider_ambiguous"
+        ):
+            raise StateConflict("ambiguous dispatch lacks classification")
+        if self.status == DispatchStatus.FAILED and self.failure_category not in {
+            "provider_rejected",
+            "provider_failed",
+        }:
+            raise StateConflict("failed dispatch lacks classification")
+        if self.status == DispatchStatus.COMPLETED:
+            expected = "RUNNING" if self.action == VmAction.START else "TERMINATED"
+            if self.instance_id is None or self.instance_status != expected:
+                raise StateConflict("completed dispatch lacks terminal instance evidence")
+
+
 @dataclass(frozen=True, slots=True)
 class VmOperation:
     lease_id: UUID
@@ -29,10 +116,36 @@ class VmOperation:
     phase: OperationPhase = OperationPhase.REQUESTED
     terminated_confirmed: bool = False
     provider_operation_id: str | None = None
+    dispatch_protocol: int = 1
+    dispatch: VmDispatchReservation | None = None
 
     def __post_init__(self) -> None:
         identity(self.lease_id)
         identity(self.generation_id)
+        if type(self.dispatch_protocol) is not int or self.dispatch_protocol not in {0, 1}:
+            raise StateConflict("invalid dispatch protocol")
+        if self.dispatch is not None:
+            d = self.dispatch
+            if not isinstance(d, VmDispatchReservation) or self.dispatch_protocol != 1:
+                raise StateConflict("invalid dispatch record")
+            if (d.lease_id, d.generation_id, d.action) != (
+                self.lease_id,
+                self.generation_id,
+                self.action,
+            ):
+                raise StateConflict("dispatch operation mismatch")
+            phases = {
+                DispatchStatus.RESERVED: OperationPhase.REQUESTED,
+                DispatchStatus.AMBIGUOUS: OperationPhase.REQUESTED,
+                DispatchStatus.ACKNOWLEDGED: OperationPhase.IN_PROGRESS,
+                DispatchStatus.COMPLETED: OperationPhase.COMPLETED,
+                DispatchStatus.FAILED: OperationPhase.FAILED,
+            }
+            if (
+                self.phase != phases[d.status]
+                or self.provider_operation_id != d.provider_operation_id
+            ):
+                raise StateConflict("inconsistent operation/dispatch status")
         if (
             not isinstance(self.action, VmAction)
             or not isinstance(self.phase, OperationPhase)
@@ -74,14 +187,159 @@ class VmOperationRepository(Protocol):
         self, lease_id: UUID, action: VmAction, *, succeeded: bool, terminated: bool = False
     ) -> Mutation[VmOperation]: ...
     def stop_is_settled(self, lease_id: UUID) -> bool: ...
+    def reserve_dispatch(
+        self,
+        lease_id: UUID,
+        generation_id: UUID,
+        action: VmAction,
+        reservation_id: UUID,
+        request_id: UUID,
+        now: datetime,
+    ) -> Mutation[VmOperation]: ...
+    def record_dispatch(
+        self,
+        lease_id: UUID,
+        action: VmAction,
+        reservation_id: UUID,
+        status: DispatchStatus,
+        now: datetime,
+        provider_operation_id: str | None = None,
+        instance_id: str | None = None,
+        instance_status: str | None = None,
+        failure_category: str | None = None,
+        terminated: bool = False,
+    ) -> Mutation[VmOperation]: ...
 
 
 class InMemoryVmOperations:
     """Non-durable test implementation. Methods are linearizable and retry safe."""
 
-    def __init__(self) -> None:
+    def __init__(self, repository=None) -> None:
         self._lock = RLock()
+        self._repository = repository
         self._operations: dict[tuple[UUID, VmAction], VmOperation] = {}
+
+    def reserve_dispatch(self, lease_id, generation_id, action, reservation_id, request_id, now):
+        """Atomic ownership + opposite operation + reservation CAS; no expiry/takeover."""
+        if self._repository is None:
+            raise StateConflict("dispatch requires shared ownership repository")
+        with self._repository._lock, self._lock:
+            for value in (lease_id, generation_id, reservation_id, request_id):
+                identity(value)
+            require_utc(now)
+            lease = self._repository.vm_use()
+            if lease is None or (lease.lease_id, lease.generation_id) != (lease_id, generation_id):
+                raise StateConflict("stale dispatch VM owner")
+            old = self._require(lease_id, action)
+            if old.generation_id != generation_id:
+                raise StateConflict("dispatch generation mismatch")
+            # Once reserved, the same logical operation must remain
+            # reconcilable while cleanup sequencing changes around it.
+            if old.dispatch is not None:
+                return Mutation(old, False)
+            if action == VmAction.START:
+                self._repository._live(generation_id)
+                if lease.phase != VmPhase.IN_USE or self.get(lease_id, VmAction.STOP) is not None:
+                    raise StateConflict("start fenced by cleanup")
+            elif lease.phase != VmPhase.STOPPING:
+                raise StateConflict("stop requires cleanup fence")
+            opposite = self.get(
+                lease_id, VmAction.STOP if action == VmAction.START else VmAction.START
+            )
+            if opposite is not None and opposite.phase not in {
+                OperationPhase.COMPLETED,
+                OperationPhase.FAILED,
+            }:
+                raise DispatchPending("opposite VM operation remains unresolved")
+            if old.dispatch_protocol != 1 or old.phase != OperationPhase.REQUESTED:
+                raise StateConflict("legacy dispatch requires operator reconciliation")
+            dispatch = VmDispatchReservation(
+                reservation_id, request_id, lease_id, generation_id, action, now, now
+            )
+            result = replace(old, dispatch=dispatch)
+            self._operations[lease_id, action] = result
+            return Mutation(result, True)
+
+    def record_dispatch(
+        self,
+        lease_id,
+        action,
+        reservation_id,
+        status,
+        now,
+        provider_operation_id=None,
+        instance_id=None,
+        instance_status=None,
+        failure_category=None,
+        terminated=False,
+    ):
+        with self._lock:
+            old = self._require(lease_id, action)
+            d = old.dispatch
+            if d is None or d.reservation_id != reservation_id:
+                raise StateConflict("unknown dispatch reservation")
+            require_utc(now)
+            if now < d.updated_at:
+                raise StateConflict("dispatch evidence precedes state")
+            if d.status in {DispatchStatus.COMPLETED, DispatchStatus.FAILED}:
+                if (
+                    status != d.status
+                    or provider_operation_id != d.provider_operation_id
+                    or instance_id != d.instance_id
+                    or instance_status != d.instance_status
+                    or failure_category != d.failure_category
+                    or terminated != old.terminated_confirmed
+                ):
+                    raise StateConflict("terminal dispatch evidence conflict")
+                return Mutation(old, False)
+            if (
+                status == d.status
+                and provider_operation_id == d.provider_operation_id
+                and instance_id == d.instance_id
+                and instance_status == d.instance_status
+                and failure_category == d.failure_category
+                and not terminated
+            ):
+                return Mutation(old, False)
+            if d.status == DispatchStatus.ACKNOWLEDGED and status in {
+                DispatchStatus.RESERVED,
+                DispatchStatus.AMBIGUOUS,
+            }:
+                return Mutation(old, False)
+            if status == DispatchStatus.RESERVED:
+                raise StateConflict("dispatch reservation cannot be reset")
+            if (
+                d.provider_operation_id is not None
+                and provider_operation_id != d.provider_operation_id
+            ):
+                raise StateConflict("dispatch provider identity conflict")
+            phases = {
+                DispatchStatus.ACKNOWLEDGED: OperationPhase.IN_PROGRESS,
+                DispatchStatus.AMBIGUOUS: OperationPhase.REQUESTED,
+                DispatchStatus.COMPLETED: OperationPhase.COMPLETED,
+                DispatchStatus.FAILED: OperationPhase.FAILED,
+            }
+            if status not in phases:
+                raise StateConflict("invalid dispatch outcome")
+            if terminated != (action == VmAction.STOP and status == DispatchStatus.COMPLETED):
+                raise StateConflict("dispatch lacks consistent termination evidence")
+            result = replace(
+                old,
+                phase=phases[status],
+                provider_operation_id=provider_operation_id,
+                terminated_confirmed=terminated,
+                dispatch=replace(
+                    d,
+                    status=status,
+                    updated_at=now,
+                    provider_operation_id=provider_operation_id,
+                    instance_id=instance_id,
+                    instance_status=instance_status,
+                    failure_category=failure_category,
+                ),
+            )
+            self._operations[lease_id, action] = result
+            return Mutation(result, True)
 
     def request(self, lease: VmUseLease, action: VmAction) -> Mutation[VmOperation]:
         with self._lock:

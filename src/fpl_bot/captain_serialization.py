@@ -39,7 +39,13 @@ from fpl_bot.captain_state import (
     VmPhase,
     VmUseLease,
 )
-from fpl_bot.captain_vm_operations import OperationPhase, VmAction, VmOperation
+from fpl_bot.captain_vm_operations import (
+    DispatchStatus,
+    OperationPhase,
+    VmAction,
+    VmDispatchReservation,
+    VmOperation,
+)
 
 RECORDS = {
     t.__name__: t
@@ -57,6 +63,7 @@ RECORDS = {
         TaskIntent,
         VmUseLease,
         SessionHealthEvidence,
+        VmDispatchReservation,
         VmOperation,
     )
 }
@@ -75,6 +82,7 @@ ENUMS = {
         TaskKind,
         VmPhase,
         OperationPhase,
+        DispatchStatus,
         VmAction,
     )
 }
@@ -237,10 +245,17 @@ def _decode(data):
         raise ValueError("record fields")
     expected = {f.name for f in fields(cls)}
     field_data = dict(data["fields"])
-    # Milestone 6 VM-operation documents predate provider operation IDs. They
-    # remain valid records; the new field is optional reconciliation evidence.
-    if cls is VmOperation and set(field_data) == expected - {"provider_operation_id"}:
-        field_data["provider_operation_id"] = None
+    # Legacy VM-operation records remain readable for audit only. Protocol zero
+    # deliberately cannot be dispatched without operator reconciliation.
+    if cls is VmOperation:
+        missing = expected - set(field_data)
+        if missing in (
+            {"dispatch_protocol", "dispatch"},
+            {"provider_operation_id", "dispatch_protocol", "dispatch"},
+        ):
+            field_data.setdefault("provider_operation_id", None)
+            field_data["dispatch_protocol"] = 0
+            field_data["dispatch"] = None
     if set(field_data) != expected:
         raise ValueError("record fields")
     value = cls(**{k: _decode(v) for k, v in field_data.items()})
@@ -258,6 +273,23 @@ def to_document(value) -> dict:
         raise InvalidCaptainDocument("invalid Captain durable record") from None
 
 
+def _canonical_for_input(original, canonical):
+    """Remove only explicitly supported legacy fields, including nested records."""
+    if type(original) is not dict or type(canonical) is not dict:
+        return canonical
+    if set(original) == {"tuple"} and set(canonical) == {"tuple"}:
+        canonical["tuple"] = [
+            _canonical_for_input(old, new)
+            for old, new in zip(original["tuple"], canonical["tuple"], strict=True)
+        ]
+    if original.get("record") == "VmOperation" and canonical.get("record") == "VmOperation":
+        original_fields = original.get("fields", {})
+        for name in ("provider_operation_id", "dispatch_protocol", "dispatch"):
+            if name not in original_fields:
+                canonical["fields"].pop(name, None)
+    return canonical
+
+
 def from_document(data):
     try:
         if type(data) is not dict or set(data) != {"schema_version", "value"}:
@@ -266,10 +298,7 @@ def from_document(data):
             raise ValueError("schema version")
         value = _decode(data["value"])
         canonical = to_document(value)
-        if isinstance(value, VmOperation) and "provider_operation_id" not in data["value"].get(
-            "fields", {}
-        ):
-            canonical["value"]["fields"].pop("provider_operation_id", None)
+        canonical["value"] = _canonical_for_input(data["value"], canonical["value"])
         if canonical != data:
             raise ValueError("noncanonical or inconsistent document")
         return value

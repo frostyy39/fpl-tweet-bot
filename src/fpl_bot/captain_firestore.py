@@ -287,7 +287,10 @@ class FirestoreCaptainVmOperations(_FirestoreBase):
     def _invoke(self, method, *args, **kwargs):
         def operation(tx):
             unit = _Unit(self.client, tx)
-            ledger = InMemoryVmOperations()
+            # Dispatch reservation must read the singleton VM owner, current
+            # generation and operation records in this same retryable transaction.
+            repository = unit.reference("vm_use", ())
+            ledger = InMemoryVmOperations(repository)
             ledger._operations = unit.maps["operations"]
             result = getattr(ledger, method)(*args, **kwargs)
             unit.flush()
@@ -329,5 +332,13 @@ for _name in (
     "session_health",
 ):
     setattr(FirestoreCaptainRepository, _name, _forward(InMemoryCaptainRepository, _name))
-for _name in ("request", "get", "acknowledge", "finish", "stop_is_settled"):
+for _name in (
+    "request",
+    "get",
+    "acknowledge",
+    "finish",
+    "stop_is_settled",
+    "reserve_dispatch",
+    "record_dispatch",
+):
     setattr(FirestoreCaptainVmOperations, _name, _forward(InMemoryVmOperations, _name))

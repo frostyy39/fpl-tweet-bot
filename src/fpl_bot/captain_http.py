@@ -260,7 +260,12 @@ def create_captain_app(
         if envelope.kind.value != kind:
             raise StateConflict("task envelope conflict")
         result = controller.deliver(envelope)
-        if envelope.kind == TaskKind.PUBLISH and candidate_validator is not None:
+        if (
+            envelope.kind == TaskKind.PUBLISH
+            and candidate_validator is not None
+            and result.status == "publish_eligible_no_write"
+        ):
+            assignment = envelope.assignment
             generation = controller.repository.generation(assignment.generation_id)
             attempt = controller.repository.generation_acquisition(assignment.generation_id)
             if attempt is None or attempt.handoff is None:

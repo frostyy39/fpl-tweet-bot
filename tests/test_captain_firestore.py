@@ -28,7 +28,7 @@ from fpl_bot.captain_serialization import InvalidCaptainDocument, from_document,
 from fpl_bot.captain_state import GenerationStatus as G
 from fpl_bot.captain_state import PostingStatus as P
 from fpl_bot.captain_state import PostKey, SessionHealthEvidence, StateConflict, TaskKind
-from fpl_bot.captain_vm_operations import VmAction
+from fpl_bot.captain_vm_operations import DispatchStatus, VmAction
 
 T = datetime(2026, 9, 18, 15, 30, 0, 123456, tzinfo=UTC)
 KEY = PostKey("12345", 5)
@@ -370,6 +370,134 @@ def test_vm_fence_and_operations_survive_restart():
     assert repo.vm_use() == newer
     with pytest.raises(StateConflict):
         repo.begin_cleanup(lease.lease_id, lease.generation_id)
+
+
+def test_firestore_dispatch_reservation_is_atomic_replay_safe_and_serialized():
+    repo, operations, client = adapters()
+    repo.plan(KEY, ASSIGNMENT, None, T)
+    lease = repo.acquire_vm(ASSIGNMENT.generation_id, UUID(int=20), T).record
+    operations.request(lease, VmAction.START)
+    first = operations.reserve_dispatch(
+        lease.lease_id,
+        lease.generation_id,
+        VmAction.START,
+        UUID(int=40),
+        UUID(int=41),
+        T,
+    )
+    replay = operations.reserve_dispatch(
+        lease.lease_id,
+        lease.generation_id,
+        VmAction.START,
+        UUID(int=42),
+        UUID(int=43),
+        T,
+    )
+    assert first.applied and not replay.applied
+    assert replay.record.dispatch == first.record.dispatch
+    restarted_ops = adapters(client)[1]
+    assert restarted_ops.get(lease.lease_id, VmAction.START) == first.record
+    assert from_document(to_document(first.record)) == first.record
+
+
+def test_overlapping_firestore_dispatch_reservations_have_one_owner():
+    from threading import Barrier
+
+    repo, operations, client = adapters()
+    repo.plan(KEY, ASSIGNMENT, None, T)
+    lease = repo.acquire_vm(ASSIGNMENT.generation_id, UUID(int=20), T).record
+    operations.request(lease, VmAction.START)
+    barrier = Barrier(2)
+
+    def overlapping_transaction():
+        transaction = Transaction(client)
+        barrier.wait(timeout=10)
+        return transaction
+
+    client.transaction = overlapping_transaction
+    results = compete(
+        [
+            lambda: operations.reserve_dispatch(
+                lease.lease_id,
+                lease.generation_id,
+                VmAction.START,
+                UUID(int=50),
+                UUID(int=51),
+                T,
+            ),
+            lambda: operations.reserve_dispatch(
+                lease.lease_id,
+                lease.generation_id,
+                VmAction.START,
+                UUID(int=52),
+                UUID(int=53),
+                T,
+            ),
+        ]
+    )
+    assert sum(result.applied for result in results) == 1
+    assert results[0].record.dispatch == results[1].record.dispatch
+
+
+def test_unresolved_dispatch_conflict_is_fenced_inside_firestore_transaction():
+    repo, operations, _ = adapters()
+    repo.plan(KEY, ASSIGNMENT, None, T)
+    lease = repo.acquire_vm(ASSIGNMENT.generation_id, UUID(int=20), T).record
+    operations.request(lease, VmAction.START)
+    start = operations.reserve_dispatch(
+        lease.lease_id,
+        lease.generation_id,
+        VmAction.START,
+        UUID(int=40),
+        UUID(int=41),
+        T,
+    ).record
+    stopping = repo.begin_cleanup(lease.lease_id, lease.generation_id).record
+    operations.request(stopping, VmAction.STOP)
+    with pytest.raises(StateConflict):
+        operations.reserve_dispatch(
+            lease.lease_id,
+            lease.generation_id,
+            VmAction.STOP,
+            UUID(int=42),
+            UUID(int=43),
+            T,
+        )
+    operations.record_dispatch(
+        lease.lease_id,
+        VmAction.START,
+        start.dispatch.reservation_id,
+        DispatchStatus.COMPLETED,
+        T,
+        instance_id="42",
+        instance_status="RUNNING",
+    )
+    assert operations.reserve_dispatch(
+        lease.lease_id,
+        lease.generation_id,
+        VmAction.STOP,
+        UUID(int=42),
+        UUID(int=43),
+        T,
+    ).applied
+
+
+def test_legacy_vm_operation_decodes_but_cannot_invent_dispatch_authority():
+    repo, operations, _ = adapters()
+    repo.plan(KEY, ASSIGNMENT, None, T)
+    lease = repo.acquire_vm(ASSIGNMENT.generation_id, UUID(int=20), T).record
+    operation = operations.request(lease, VmAction.START).record
+    legacy = to_document(operation)
+    for field in ("provider_operation_id", "dispatch_protocol", "dispatch"):
+        legacy["value"]["fields"].pop(field)
+    decoded = from_document(legacy)
+    assert decoded.dispatch_protocol == 0 and decoded.dispatch is None
+    nested = to_document(((lease.lease_id, VmAction.START), operation))
+    operation_fields = nested["value"]["tuple"][1]["fields"]
+    for field in ("provider_operation_id", "dispatch_protocol", "dispatch"):
+        operation_fields.pop(field)
+    nested_decoded = from_document(nested)[1]
+    assert nested_decoded.dispatch_protocol == 0 and nested_decoded.dispatch is None
 
 
 def test_explicit_database_client_binding():
