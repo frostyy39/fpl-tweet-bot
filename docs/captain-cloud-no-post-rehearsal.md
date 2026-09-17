@@ -203,7 +203,7 @@ remains the budget assumption, subject to actual quotas, VAT, rates and billing.
 The older private London controller remains idle with minimum zero until a later
 explicit cleanup decision; it is not the target of active clients/tasks/Scheduler.
 
-## Private worker registration: next required interaction
+## Private worker registration procedure
 
 Do not enable the paused queue/planner or run the startup task during preparation.
 The operator uses their established local IAP/RDP channel. After the verified
@@ -246,7 +246,92 @@ In Task Scheduler:
 5. Do not select Run, reboot, or enable the queue/planner. Report successful
    registration so the subsequent bounded boot/no-assignment proof can be planned.
 
-The password/private Windows interaction is the current pause point. Full Tasks
-delivery, Compute reservations/start/stop reconciliation, Windows unattended
-transport, fresh projection handoff and canonical candidate remain unproven by
-this partial cloud rehearsal. X publisher integration is still excluded.
+At checkpoint `0d195cef76520e714411338e772893c54788f0c9`, registration was
+the private Windows interaction pause point. The subsequent evidence below
+supersedes that pause; it does not claim a complete end-to-end rehearsal.
+
+## Registered-worker cold boot and early Tasks delivery: 17 September
+
+The operator confirmed successful native password-backed registration of
+`Captain-Worker-NoPost`, without a manual Run. They then closed their RDP window
+and user-managed IAP tunnel, and agreed not to reconnect during the proof.
+
+The setup VM was stopped and independently observed as TERMINATED. Compute
+reported its subsequent cold start at `2026-09-17T22:33:49.306Z`; Windows reported
+boot at `22:33:57.500Z`. The temporary read-only SYSTEM observer verified:
+
+- principal `captaintrial`, Password logon, Limited privileges;
+- one Boot trigger, 30-second delay, exact prepared Python/action/working directory;
+- network required, IgnoreNew, no restart, demand start disabled, 25-minute bound;
+- no current-boot interactive/unlock/RDP/cached-interactive logons for `captaintrial`
+  in the enabled Security log, corroborating the operator's no-login confirmation;
+- the actual worker's strict UTF-8 audit: `no_assignment`, exit 0, no handoff/digest;
+- zero observed Chrome processes and no profile lifecycle markers.
+
+The Python audit spans `22:35:53.119721Z`–`22:35:53.580305Z`. Its SHA256 is
+`F705ED505ED5B86CA20CD7A949F8FA8230316AACDB0241200A7899C9E6E0A0EC`.
+Task history contains action/start events at `22:35:03.888Z` and completion/result
+events at `22:35:53.646Z`; Task Scheduler separately reported LastRunTime
+`22:35:35Z`, LastTaskResult 0, Ready. These are recorded observations, not a
+claim that all Windows startup clock timestamps are identical. The controller
+logged the Windows worker's authenticated assignment request with HTTP 204 at
+`22:35:53.418509Z`. No identity token or request Authorization header was captured.
+
+`observe-captain-worker-boot.ps1` reads only Task Scheduler, logon-event metadata,
+process counts, lifecycle marker existence and whitelisted worker-audit fields.
+SYSTEM never executes the acquisition, impersonates the user, reads cookies or
+opens Chrome. `install-captain-boot-observer.ps1` preserves the existing baseline
+startup script verbatim, prepends a bounded background observer, and saves only
+the original startup/guest-attributes settings in ignored local artifacts.
+Restoration refuses a concurrent script change. The original settings were
+restored after observation; the observer exited and will not run on later boots.
+
+Compute independently reported the VM TERMINATED, with lastStopTimestamp
+`2026-09-17T22:38:20.149Z`. The four-hour maximum-run-duration STOP safeguard
+remains intact. This boot used operator Compute commands, **not** the durable
+controller dispatch path; it does not prove real provider reservation fencing.
+
+The guarded fresh planner probe succeeded before and after the Tasks test at
+`22:35:38.888Z` and `22:43:44.329Z`. Both pairs of ticks were idempotent, used
+fresh official FPL data, reported the same generation and an idle VM path, and
+denied the planner identity at the worker endpoint.
+
+`probe-captain-early-task.ps1` copied the already-durable warmup task's exact body
+into temporary task `captain-rehearsal-early-2bac31d841134741979db24856b81dac`.
+It enforced the paused queue, expected URL/OIDC identity/audience, diagnostic
+destination, warmup kind and a 30-minute pre-warmup margin. RunTask dispatched
+that diagnostic once while the real scheduled task remained untouched.
+The real Captain warmup handler logged HTTP 200 at `22:42:06.473300Z`. Its
+unchanged time/state gate allowed no early VM ownership/acquisition. The
+diagnostic task was removed; only the three intended future tasks remain.
+Invariant state is checked separately by `captain-state-inspection-probe.yaml`,
+which performs Captain-only reads and asserts PLANNED/current generation, no VM
+lease, no acquisition, no posting attempts and no pending outbox intents.
+The real state probe confirmed all these invariants at `22:47:49.608264Z`.
+
+Temporary planner/state-inspection jobs are deleted after retaining Cloud
+Logging evidence. The Captain queue and planner remain PAUSED. The startup
+worker remains intentionally registered; there is no Codex-owned IAP tunnel.
+No X implementation/credentials were enabled, and no Good Luck resource changed.
+
+### Timing-gated remainder
+
+The accepted repository rejects VM-use claims before the official generation's
+warmup time, not only projection acquisitions before release. For the currently
+freshly validated generation, warmup is 18 September 15:15 UTC / 16:15 BST;
+release is 15:30 UTC / 16:30 BST, with inclusive expiry 15:35 UTC / 16:35 BST.
+There is no accepted rehearsal-purpose release contract or timing bypass.
+
+Therefore this run proves the no-assignment Windows metadata-identity transport
+and real early Tasks delivery, **not** durable Compute START/STOP dispatch,
+released browser acquisition, handoff acceptance or cloud candidate validation.
+Those require a deliberately activated genuine-window NO-POST rehearsal.
+No browser was opened, projection fixture was represented as live acquisition,
+handoff fabricated, candidate generated, or full Milestone 8 pass claimed.
+The retained paused tasks do not arm that future rehearsal by themselves.
+X publisher integration remains excluded.
+
+Validation for this checkpoint: nine offline Windows helper tests, 46 focused
+runtime/HTTP/adapter/helper tests, 629 Captain tests and 1,338 full-suite tests
+passed. Ruff lint, formatting, dependency integrity and diff checks passed.
+The normal tests use fake CLI/browser/transport inputs and no live Google calls.

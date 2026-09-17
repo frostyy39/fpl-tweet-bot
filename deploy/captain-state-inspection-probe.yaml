@@ -1,0 +1,50 @@
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: captain-state-inspection-probe
+spec:
+  template:
+    spec:
+      taskCount: 1
+      parallelism: 1
+      template:
+        spec:
+          serviceAccountName: captain-controller@fpl-frosty-bot-v1.iam.gserviceaccount.com
+          maxRetries: 0
+          timeoutSeconds: '60'
+          containers:
+            - image: europe-west2-docker.pkg.dev/fpl-frosty-bot-v1/captain-images/controller:9e434fbe64b45cf09754c8d1bd7f67ba8d11adee
+              resources:
+                limits:
+                  cpu: '1'
+                  memory: 512Mi
+              command: [python]
+              args:
+                - '-c'
+                - |
+                  import json
+                  from datetime import UTC, datetime
+                  from uuid import UUID
+                  from fpl_bot.captain_firestore import FirestoreCaptainRepository
+                  from fpl_bot.captain_state import GenerationStatus
+                  repo = FirestoreCaptainRepository(project='fpl-frosty-bot-v1', database='captain-state')
+                  # Diagnostic identity, not a hardcoded authoritative event/deadline.
+                  gid = UUID('3c114305-3fa1-5fa3-860e-a56783156a5a')
+                  generation = repo.generation(gid)
+                  current = repo.current(generation.key)
+                  if current != generation or generation.status != GenerationStatus.PLANNED:
+                      raise SystemExit('Generation unexpectedly changed; read-only inspection stopped')
+                  if repo.vm_use() is not None or repo.generation_acquisition(gid) is not None:
+                      raise SystemExit('Unexpected VM/acquisition ownership; inspection stopped')
+                  if repo.posting(generation.key).attempts or repo.pending_intents():
+                      raise SystemExit('Unexpected posting attempt/pending task intent')
+                  print(json.dumps(dict(classification='captain_early_delivery_state_probe', postable=False,
+                      observed_at_utc=datetime.now(UTC).isoformat(), database='captain-state',
+                      generation_id=str(gid), generation_status=generation.status.value,
+                      event_id=generation.assignment.event_id, event_code=generation.assignment.event_code,
+                      deadline_utc=generation.assignment.timing.deadline_utc.isoformat(),
+                      warmup_utc=generation.assignment.timing.warmup_utc.isoformat(),
+                      release_utc=generation.assignment.timing.release_utc.isoformat(),
+                      expiry_utc=generation.assignment.timing.expiry_utc.isoformat(),
+                      vm_lease_absent=True, acquisition_absent=True, posting_attempts=0,
+                      pending_intents=0), sort_keys=True))
