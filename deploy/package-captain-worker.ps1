@@ -11,6 +11,7 @@ foreach ($module in $modules) {
     Copy-Item -LiteralPath "src/fpl_bot/$module.py" -Destination "$destination/fpl_bot/$module.py"
 }
 Copy-Item -LiteralPath deploy/captain-worker-config.json -Destination "$destination/worker-config.json"
+Copy-Item -LiteralPath deploy/prepare-captain-worker-remote.ps1 -Destination "$destination/prepare-captain-worker-remote.ps1"
 $zip = "$destination.zip"
 Compress-Archive -Path "$destination/*" -DestinationPath $zip -CompressionLevel Optimal
 Get-FileHash -LiteralPath $zip -Algorithm SHA256

@@ -17,6 +17,7 @@ if (-not $Apply) {
 }
 $state = Cloud @('compute','instances','describe',$instance,"--project=$project","--zone=$zone",'--format=value(status)')
 if ($state -ne 'TERMINATED') { throw 'VM must be stopped before changing its workload identity' }
+Cloud @('services','enable','policytroubleshooter.googleapis.com',"--project=$project",'--quiet')
 $databases = Cloud @('firestore','databases','list',"--project=$project",'--format=value(name)')
 if ($databases -notcontains "projects/$project/databases/$database") {
     Cloud @('firestore','databases','create',"--project=$project","--database=$database","--location=$region",'--type=firestore-native','--delete-protection','--quiet')

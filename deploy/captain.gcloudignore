@@ -13,3 +13,12 @@ tests
 docs
 captain-*.zip
 captain-rehearsal-artifacts
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.dpapi
+**/*.token
+**/oauth-token*.json
+**/credentials*.json
+**/service-account*.json

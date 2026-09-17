@@ -67,6 +67,16 @@ logged on or not, one instance, network required, no automatic restart, and a
 bounded startup trigger. Enter the existing password only in the native Windows
 dialog. Do not use SYSTEM, S4U, auto-login or password resets.
 
+The bundle includes `prepare-captain-worker-remote.ps1`. Run its reviewed contents
+inside the existing captaintrial desktop, supplying the verified ZIP and SHA256.
+It requires the existing runtime, closed Chrome and free profile ownership; refuses
+an existing application directory; and grants only the actual current-user SID,
+SYSTEM and Administrators access. It builds `Captain-Worker-NoPost.xml` in memory
+and writes it as UTF-8. It does **not** register or run the task. Import the XML in
+Task Scheduler as `Captain-Worker-NoPost`, check Password/Limited logon, then save
+with the existing password only in the native dialog. Its trigger is boot (not
+logon), delayed 30 seconds, with a 25-minute limit, IgnoreNew and no demand start.
+
 Pending release polling is cancellable, at most 120 bounded checks with at most
 10 seconds between pending replies, covering the 15-minute warmup. It does not
 open Chrome during readiness. Real acquisition still requires fresh controller
@@ -90,3 +100,36 @@ actual billing; do not assume the four-hour emergency stop is the normal runtime
 
 No Good Luck service, queue, job, state, OAuth or runtime identity is modified.
 Record actual provider evidence separately; local tests are not cloud proof.
+
+## 17 September 2026 partial cloud evidence
+
+Phase A release correction is checkpointed at
+`a87971e4ee17b474450cc3d5a1b5322d49d3b184`. Captain-only resources were created
+additively: named London database `captain-state`, the paused queue/planner,
+private controller, image/source repositories and five service identities.
+The existing Windows VM was never started; its worker identity was attached while
+TERMINATED and its four-hour STOP safeguard retained. No Windows account or
+Chrome profile was accessed or modified.
+
+The authenticated temporary planner invocation reached the controller at
+19:46:51 UTC, but fresh official FPL bootstrap retrieval returned HTTP 403 before
+generation creation or any VM work. A separate body-free public HTTP matrix at
+19:50:58 UTC returned 403 for bootstrap, fixtures and site root with both existing
+diagnostic header profiles. This does **not** prove IP blocking. The temporary
+Scheduler probe and HTTP-probe Cloud Run job were removed. No cached official data,
+fake release clock, timing bypass, proxy or FPL Review acquisition was substituted.
+Both real planner and queue remain PAUSED. The full cloud rehearsal is NOT passed.
+
+`python -m fpl_bot.captain_persistence_probe` is an independent, explicitly
+non-postable persistence check, intended to run under the controller identity.
+It checks database metadata isolation without requesting any Good Luck document,
+performs read-only repository operations, and writes/replays only an immutable
+`captain_integration_probes` document. It does not create a generation, assignment,
+task intent, VM lease, candidate or posting record. Its output is evidence only
+after an actual successful execution; mocked tests are not live IAM proof.
+
+The startup task still needs private native-GUI registration. Cloud Tasks delivery,
+real Compute dispatch/reservation reconciliation, VM metadata-token transport,
+handoff/candidate generation and final VM cleanup have not yet been exercised
+end-to-end. Fresh official FPL reachability and the private registration step must
+be resolved before claiming that chain or enabling the genuine deadline run.
