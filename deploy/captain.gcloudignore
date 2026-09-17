@@ -1,0 +1,15 @@
+.git
+.venv
+.pytest_cache
+.ruff_cache
+__pycache__
+*.pyc
+.env
+.env.*
+build
+dist
+*.egg-info
+tests
+docs
+captain-*.zip
+captain-rehearsal-artifacts

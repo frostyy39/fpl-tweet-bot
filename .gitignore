@@ -17,3 +17,4 @@ oauth-token*.json
 htmlcov/
 .captain-browser-profile/
 captain-browser-profile/
+captain-rehearsal-artifacts/
