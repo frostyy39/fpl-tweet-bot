@@ -1,0 +1,74 @@
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: captain-fpl-connectivity-probe
+spec:
+  template:
+    spec:
+      taskCount: 1
+      parallelism: 1
+      template:
+        spec:
+          serviceAccountName: captain-worker@fpl-frosty-bot-v1.iam.gserviceaccount.com
+          maxRetries: 0
+          timeoutSeconds: '90'
+          containers:
+            - image: europe-west2-docker.pkg.dev/fpl-frosty-bot-v1/captain-images/controller@sha256:0825a9ab7e775557de4557932bedd04b87e0619ac3b7c5d5e0a5a1b0deac0818
+              resources:
+                limits:
+                  cpu: '1'
+                  memory: 512Mi
+              command: [python]
+              args:
+                - '-c'
+                - |
+                  import json, os, platform, socket, ssl, time
+                  from datetime import UTC, datetime
+                  from urllib.error import HTTPError
+                  from urllib.request import urlopen
+                  from fpl_bot.api import FplApiClient, FPL_REQUEST_HEADERS
+                  from fpl_bot.events import parse_events, select_next_event
+                  from fpl_bot.fpl_http_probe import FplHttpMatrixProbe
+                  observations = []
+                  def observe(request, **kwargs):
+                      started = datetime.now(UTC).isoformat()
+                      tick = time.monotonic()
+                      try:
+                          response = urlopen(request, **kwargs)
+                      except HTTPError as error:
+                          entry = FplHttpMatrixProbe._http_observation(
+                              request.full_url, 'production', error.code,
+                              error.geturl(), error.headers).fields()
+                          entry.update(started_at_utc=started, duration_seconds=time.monotonic()-tick)
+                          observations.append(entry)
+                          error.close()
+                          raise
+                      entry = FplHttpMatrixProbe._http_observation(
+                          request.full_url, 'production', response.getcode(),
+                          response.geturl(), response.headers).fields()
+                      entry.update(started_at_utc=started, duration_seconds=time.monotonic()-tick)
+                      observations.append(entry)
+                      return response
+                  source = FplApiClient(opener=observe)
+                  outcomes = {}
+                  event = None
+                  try:
+                      bootstrap = source.fetch_bootstrap_static()
+                      event = select_next_event(parse_events(bootstrap['events']), datetime.now(UTC))
+                      outcomes['bootstrap'] = 'fresh_valid_event'
+                  except Exception as error:
+                      outcomes['bootstrap'] = type(error).__name__
+                  try:
+                      fixtures = source.fetch_event_fixtures(event.event_id) if event else source._get_json('fixtures/')
+                      outcomes['fixtures'] = 'fresh_json_array' if isinstance(fixtures, list) else 'invalid_shape'
+                  except Exception as error:
+                      outcomes['fixtures'] = type(error).__name__
+                  try:
+                      families = sorted({item[0].name for item in socket.getaddrinfo('fantasy.premierleague.com', 443)})
+                  except OSError:
+                      families = ['dns_unavailable']
+                  print(json.dumps(dict(classification='captain_fpl_connectivity_probe',
+                      postable=False, observations=observations, outcomes=outcomes,
+                      python=platform.python_version(), openssl=ssl.OPENSSL_VERSION,
+                      dns_families=families, headers=FPL_REQUEST_HEADERS,
+                      proxy_configured=any(os.environ.get(k) for k in ('HTTPS_PROXY','HTTP_PROXY','ALL_PROXY'))), sort_keys=True))

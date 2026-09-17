@@ -32,7 +32,7 @@ Set-Acl -LiteralPath $root -AclObject $acl
 Expand-Archive -LiteralPath $Bundle -DestinationPath $root
 New-Item -ItemType Directory -Path "$root/audits" | Out-Null
 $config = Get-Content -LiteralPath "$root/worker-config.json" -Raw | ConvertFrom-Json
-if ($config.controller_origin -ne 'https://captain-controller-524790767721.europe-west2.run.app' -or
+if ($config.controller_origin -ne 'https://captain-controller-524790767721.europe-west1.run.app' -or
     $config.profile_dir -ne "$env:LOCALAPPDATA\FPLBot\FPLReviewCaptainProfile" -or
     $config.audit_parent -ne "$root\audits" -or $config.expected_user -ne 'captaintrial') {
     throw 'Unexpected worker configuration'

@@ -29,6 +29,12 @@ Build using `deploy/captain-build.yaml`, an explicit
 `--ignore-file=deploy/captain.gcloudignore`, the Captain build identity and its
 private source bucket. Tag images with the full Git commit and record the image
 digest. Deploy with `deploy/deploy-captain.ps1 -Image <commit-tagged-image>`.
+The controller now runs in `europe-west1`; its configured audience/origin and
+worker configuration use that region. State, queue, Scheduler, images and the
+Windows VM remain in London. The paused London Scheduler's URI/audience are
+updated explicitly. Small cross-region state/task calls do not require a NAT,
+proxy or static IP. The earlier London controller remains private and inactive;
+no scheduler/task/client targets it. Good Luck stays unchanged.
 Queue and minute-cadence planner are intentionally **PAUSED** pending rehearsal.
 No secret environment variables or Secret Manager versions are configured.
 
@@ -133,3 +139,24 @@ real Compute dispatch/reservation reconciliation, VM metadata-token transport,
 handoff/candidate generation and final VM cleanup have not yet been exercised
 end-to-end. Fresh official FPL reachability and the private registration step must
 be resolved before claiming that chain or enabling the genuine deadline run.
+
+## Controlled regional connectivity comparison
+
+`deploy/captain-fpl-connectivity-probe.yaml` runs two read-only requests using the
+existing `FplApiClient` and the exact immutable `d438d398` image. It records only
+allowlisted response metadata, exception classes, JSON shape/chronology success,
+runtime versions, DNS address families and whether a proxy is configured. It
+does not save bodies, inspect cookies, create state or control the VM. Failed
+bootstrap is followed by the unfiltered fixtures endpoint; successful bootstrap
+selects the event fresh and queries its fixtures without a hardcoded event ID.
+Temporary jobs should be deleted after collecting their safe Cloud Logging output.
+
+On 17 September at 20:51:18 UTC, London returned two empty 403 responses from
+Varnish through LCY edges. At 20:52:17 UTC, Belgium returned valid bootstrap JSON
+and event fixtures with two HTTP 200 responses through BRU edges. Both used
+Python 3.12.14, OpenSSL 3.5.7, IPv4 DNS results, the same GET requests/headers and
+no proxy. This supports a regional egress/CDN difference; it does not identify
+the underlying filtering policy or prove a general Google Cloud IP block.
+The repository Good Luck factory uses the identical default `FplApiClient`; both
+Dockerfiles use `python:3.12-slim`, and its existing service has no VPC-egress
+override. No Good Luck request, deployment or secret access was performed.

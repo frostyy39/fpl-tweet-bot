@@ -14,7 +14,7 @@ from fpl_bot.captain_vm_operations import InMemoryVmOperations, VmAction
 from fpl_bot.captain_worker_cli import BoundedPollingClient
 
 D = datetime(2026, 9, 18, 17, 30, tzinfo=UTC)
-ORIGIN = "https://captain-controller-524790767721.europe-west2.run.app"
+ORIGIN = "https://captain-controller-524790767721.europe-west1.run.app"
 CONFIG = NoPostConfig(
     "fpl-frosty-bot-v1",
     "captain-state",
@@ -165,6 +165,11 @@ def test_worker_pending_poll_is_bounded_and_cancellable_without_acquisition():
         ("other", "captain-state", ORIGIN),
         ("fpl-frosty-bot-v1", "(default)", ORIGIN),
         ("fpl-frosty-bot-v1", "captain-state", "https://fpl-bot.example"),
+        (
+            "fpl-frosty-bot-v1",
+            "captain-state",
+            "https://captain-controller-524790767721.europe-west2.run.app",
+        ),
     ],
 )
 def test_no_post_deployment_rejects_unisolated_configuration(project, database, origin):

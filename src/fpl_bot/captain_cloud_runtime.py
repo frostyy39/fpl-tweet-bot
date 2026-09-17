@@ -45,7 +45,7 @@ class NoPostConfig:
     def __post_init__(self):
         if self.project != "fpl-frosty-bot-v1" or self.database != "captain-state":
             raise ValueError("Captain rehearsal must use its isolated database")
-        if self.origin != "https://captain-controller-524790767721.europe-west2.run.app":
+        if self.origin != "https://captain-controller-524790767721.europe-west1.run.app":
             raise ValueError("Captain-only controller origin required")
         if len({self.worker_email, self.tasks_email, self.planner_email}) != 3:
             raise ValueError("distinct Captain invocation identities required")
