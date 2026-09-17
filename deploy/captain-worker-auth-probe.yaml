@@ -1,0 +1,49 @@
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: captain-worker-auth-probe
+spec:
+  template:
+    spec:
+      taskCount: 1
+      parallelism: 1
+      template:
+        spec:
+          serviceAccountName: captain-worker@fpl-frosty-bot-v1.iam.gserviceaccount.com
+          maxRetries: 0
+          timeoutSeconds: '90'
+          containers:
+            - image: europe-west2-docker.pkg.dev/fpl-frosty-bot-v1/captain-images/controller:9e434fbe64b45cf09754c8d1bd7f67ba8d11adee
+              resources:
+                limits:
+                  cpu: '1'
+                  memory: 512Mi
+              command: [python]
+              args:
+                - '-c'
+                - |
+                  import json
+                  from datetime import UTC, datetime
+                  from uuid import uuid4
+                  from fpl_bot.captain_transport import CaptainWorkerHttpClient, MetadataIdentityTokenSource, MetadataTokenConfig, WorkerTransportError
+                  origin = 'https://captain-controller-524790767721.europe-west1.run.app'
+                  try:
+                      tokens = MetadataIdentityTokenSource(MetadataTokenConfig(origin))
+                      client = CaptainWorkerHttpClient(origin, origin, tokens, timeout_seconds=20)
+                      if client.obtain_assignment(uuid4()) is not None:
+                          raise SystemExit('Unexpected active worker assignment')
+                      wrong = MetadataIdentityTokenSource(MetadataTokenConfig(origin + '/wrong-audience'))
+                      denied = CaptainWorkerHttpClient(origin, origin, wrong, timeout_seconds=15)
+                      try:
+                          denied.obtain_assignment(uuid4())
+                      except WorkerTransportError as error:
+                          if error.category != 'controller_authentication_denied':
+                              raise SystemExit('Unexpected audience denial category') from None
+                      else:
+                          raise SystemExit('Unexpected wrong-audience authorization')
+                  except Exception:
+                      raise SystemExit('Worker metadata/auth probe failed safely') from None
+                  print(json.dumps(dict(classification='captain_worker_auth_probe', postable=False,
+                      finished_at_utc=datetime.now(UTC).isoformat(), metadata_token_source=True,
+                      authenticated_no_assignment=True, wrong_audience_denied=True,
+                      browser_started=False, environment='Cloud Run job; Windows VM not yet exercised'), sort_keys=True))

@@ -1,0 +1,60 @@
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: captain-release-validation-probe
+spec:
+  template:
+    spec:
+      taskCount: 1
+      parallelism: 1
+      template:
+        spec:
+          serviceAccountName: captain-controller@fpl-frosty-bot-v1.iam.gserviceaccount.com
+          maxRetries: 0
+          timeoutSeconds: '90'
+          containers:
+            - image: europe-west2-docker.pkg.dev/fpl-frosty-bot-v1/captain-images/controller:9e434fbe64b45cf09754c8d1bd7f67ba8d11adee
+              resources:
+                limits:
+                  cpu: '1'
+                  memory: 512Mi
+              command: [python]
+              args:
+                - '-c'
+                - |
+                  import json
+                  from datetime import UTC, datetime
+                  from uuid import uuid4
+                  from fpl_bot.api import FplApiClient
+                  from fpl_bot.events import parse_events, select_next_event
+                  from fpl_bot.captain_cloud_runtime import UtcClock
+                  from fpl_bot.captain_firestore import FirestoreCaptainRepository
+                  from fpl_bot.captain_http import WorkerControllerService
+                  from fpl_bot.captain_state import PostKey, GenerationStatus
+                  from fpl_bot.captain_worker import WorkerAssignment
+                  source = FplApiClient()
+                  event = select_next_event(parse_events(source.fetch_bootstrap_static()['events']), datetime.now(UTC))
+                  fixtures = source.fetch_event_fixtures(event.event_id)
+                  repository = FirestoreCaptainRepository(project='fpl-frosty-bot-v1', database='captain-state')
+                  generation = repository.current(PostKey('1', event.event_id))
+                  if generation is None or generation.status != GenerationStatus.PLANNED:
+                      raise SystemExit('Expected stored pre-warmup diagnostic generation')
+                  if generation.assignment.timing.deadline_utc != event.deadline_utc:
+                      raise SystemExit('Fresh deadline mismatch')
+                  if datetime.now(UTC) >= generation.assignment.timing.target_utc:
+                      raise SystemExit('Probe requires pre-release time; no release attempted')
+                  if repository.generation_acquisition(generation.assignment.generation_id) is not None:
+                      raise SystemExit('Existing acquisition; no release attempted')
+                  run_id = uuid4()
+                  work = WorkerAssignment(1, generation.assignment, run_id)
+                  outcome = WorkerControllerService(repository, source, UtcClock(), '1').release(work, run_id)
+                  if outcome is not None:
+                      raise SystemExit('Expected pre-T pending result')
+                  if repository.generation_acquisition(generation.assignment.generation_id) is not None:
+                      raise SystemExit('Unexpected acquisition claim')
+                  print(json.dumps(dict(classification='captain_fresh_release_probe', postable=False,
+                      finished_at_utc=datetime.now(UTC).isoformat(), event_id=event.event_id,
+                      event_code=generation.assignment.event_code, deadline_utc=event.deadline_utc.isoformat(),
+                      target_utc=generation.assignment.timing.target_utc.isoformat(),
+                      expiry_utc=generation.assignment.timing.expiry_utc.isoformat(), fixture_count=len(fixtures),
+                      release='pending_before_T', acquisition_claimed=False), sort_keys=True))

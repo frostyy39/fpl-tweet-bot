@@ -1,0 +1,71 @@
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: captain-planner-validation-probe
+spec:
+  template:
+    spec:
+      taskCount: 1
+      parallelism: 1
+      template:
+        spec:
+          serviceAccountName: captain-planner@fpl-frosty-bot-v1.iam.gserviceaccount.com
+          maxRetries: 0
+          timeoutSeconds: '90'
+          containers:
+            - image: europe-west2-docker.pkg.dev/fpl-frosty-bot-v1/captain-images/controller:9e434fbe64b45cf09754c8d1bd7f67ba8d11adee
+              resources:
+                limits:
+                  cpu: '1'
+                  memory: 512Mi
+              command: [python]
+              args:
+                - '-c'
+                - |
+                  import json
+                  from datetime import UTC, datetime, timedelta
+                  from urllib.error import HTTPError
+                  from urllib.request import Request, build_opener
+                  from fpl_bot.api import FplApiClient
+                  from fpl_bot.events import parse_events, select_next_event
+                  from fpl_bot.captain_serialization import from_document
+                  from fpl_bot.captain_transport import MetadataIdentityTokenSource, MetadataTokenConfig, _NoRedirect
+                  origin = 'https://captain-controller-524790767721.europe-west1.run.app'
+                  event = select_next_event(parse_events(FplApiClient().fetch_bootstrap_static()['events']), datetime.now(UTC))
+                  if datetime.now(UTC) >= event.deadline_utc - timedelta(hours=2, minutes=15):
+                      raise SystemExit('Probe requires pre-warmup time; no controller tick attempted')
+                  token = MetadataIdentityTokenSource(MetadataTokenConfig(origin)).token()
+                  opener = build_opener(_NoRedirect())
+                  def call(route):
+                      request = Request(origin + route, data=b'{}', method='POST', headers={
+                          'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
+                      try:
+                          with opener.open(request, timeout=30) as response:
+                              return json.loads(response.read(65537))
+                      except HTTPError as error:
+                          code = error.code
+                          error.close()
+                          raise SystemExit('Controller rejected probe: HTTP ' + str(code)) from None
+                      except Exception:
+                          raise SystemExit('Controller probe transport failed') from None
+                  inspected = call('/captain/control/inspect')
+                  if from_document(inspected['vm_lease']) is not None:
+                      raise SystemExit('Existing VM ownership; no controller tick attempted')
+                  first = call('/captain/control/tick')
+                  second = call('/captain/control/tick')
+                  if first != second or first.get('vm') != 'idle' or first.get('no_post') is not True:
+                      raise SystemExit('Unexpected planner result')
+                  denied = Request(origin + '/captain/worker/assignment', data=b'{}', method='POST',
+                      headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
+                  try:
+                      with opener.open(denied, timeout=15):
+                          raise SystemExit('Planner identity unexpectedly authorized as worker')
+                  except HTTPError as error:
+                      code = error.code
+                      error.close()
+                      if code != 403:
+                          raise SystemExit('Unexpected worker-role denial status') from None
+                  print(json.dumps(dict(classification='captain_fresh_planner_probe', postable=False,
+                      finished_at_utc=datetime.now(UTC).isoformat(), event_id=event.event_id,
+                      deadline_utc=event.deadline_utc.isoformat(), result=second, identical_replay=True,
+                      planner_worker_role_denied=True), sort_keys=True))

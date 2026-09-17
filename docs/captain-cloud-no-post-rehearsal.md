@@ -160,3 +160,93 @@ the underlying filtering policy or prove a general Google Cloud IP block.
 The repository Good Luck factory uses the identical default `FplApiClient`; both
 Dockerfiles use `python:3.12-slim`, and its existing service has no VPC-egress
 override. No Good Luck request, deployment or secret access was performed.
+
+Belgium repeated the two successful requests at 20:55:49 UTC. Controller image
+`9e434fbe64b45cf09754c8d1bd7f67ba8d11adee` has digest
+`sha256:bc6bf9eb2ea05061d063ab03bf45bddf86285cd65450a4af0eac3b604d0cc603`.
+The Belgium controller revision is `captain-controller-00001-565`. The paused
+London planner's URI/audience now reference Belgium, with its original Captain
+planner identity explicitly preserved. Deployment compares fully qualified
+Scheduler names from JSON because the CLI's display formatter shortens names.
+
+The temporary authenticated planner probe completed at 21:02:28 UTC with two
+identical successful controller ticks and a denied attempt to use the planner
+identity at the worker endpoint. Fresh official FPL selected event 5 / GW5 with
+deadline `2026-09-18T17:30:00Z`; the derived target is `15:30:00Z`, warmup
+`15:15:00Z`, expiry `15:35:00Z`. Generation
+`3c114305-3fa1-5fa3-860e-a56783156a5a` belongs only to diagnostic destination `1`.
+Three deterministic tasks (warmup, release, cleanup) are intentionally retained
+in the PAUSED Captain queue. No VM lease was created; both ticks reported idle.
+
+The real `WorkerControllerService.release`/Firestore probe completed at
+21:03:34 UTC after fresh bootstrap and fixture retrieval. It checked the stored
+generation/deadline, returned `pending_before_T` and confirmed no acquisition
+claim existed. This proves the pre-T gate, not a live at-T browser acquisition.
+At 21:04:58 UTC, the existing worker HTTP transport and metadata-token source
+successfully called the Belgium controller under the worker service identity
+and returned no assignment. A wrong-audience token was denied. This probe ran
+in a Cloud Run job; the Windows VM metadata/startup path remains unexercised.
+No bearer token or response body was logged. All temporary connectivity/planner/
+release/auth jobs must be removed after preserving their Cloud Logging evidence.
+
+`captain-planner-validation-probe.yaml` contains a pre-warmup time guard and
+requires no existing VM lease before invoking the real planner. Its source and
+controller calls use fresh official data. `captain-release-validation-probe.yaml`
+requires the stored PLANNED generation and pre-T time, and never grants release.
+`captain-worker-auth-probe.yaml` obtains no assignment and opens no browser.
+These are manual, bounded diagnostic definitions, not recurring production jobs.
+
+Regional placement adds no static-egress/NAT resource or minimum-instance cost.
+Expected cross-region state/task traffic is small and should add pennies monthly
+at normal Gameweek volume. The prior approximately £2–£4/month operating estimate
+remains the budget assumption, subject to actual quotas, VAT, rates and billing.
+The older private London controller remains idle with minimum zero until a later
+explicit cleanup decision; it is not the target of active clients/tasks/Scheduler.
+
+## Private worker registration: next required interaction
+
+Do not enable the paused queue/planner or run the startup task during preparation.
+The operator uses their established local IAP/RDP channel. After the verified
+worker ZIP is copied to the remote Downloads folder, the following interactive
+PowerShell procedure runs under the real `captaintrial` identity. Substitute the
+exact bundle basename and SHA256 printed by `package-captain-worker.ps1`:
+
+```powershell
+$Bundle = Join-Path $env:USERPROFILE 'Downloads\worker-<commit>.zip'
+$ExpectedSha256 = '<verified SHA256>'
+if ((Get-FileHash -LiteralPath $Bundle -Algorithm SHA256).Hash -ne $ExpectedSha256) {
+    throw 'STOP: bundle hash mismatch'
+}
+$SetupDirectory = Join-Path $env:TEMP ('CaptainSetup-' + [guid]::NewGuid())
+New-Item -ItemType Directory -Path $SetupDirectory | Out-Null
+Expand-Archive -LiteralPath $Bundle -DestinationPath $SetupDirectory
+$Preparation = Get-Content -LiteralPath (Join-Path $SetupDirectory 'prepare-captain-worker-remote.ps1') -Raw
+& ([scriptblock]::Create($Preparation)) -Bundle $Bundle -ExpectedSha256 $ExpectedSha256
+```
+
+This executes the verified, bundled preparation code interactively without
+changing execution policy. It checks existing dependencies and closed/free
+Chrome, creates a fresh private application directory and XML, and registers
+nothing. The files copied into the temporary folder are application source only.
+Never replace the prepared app directory if it unexpectedly already exists.
+
+In Task Scheduler:
+
+1. Select Task Scheduler Library, then **Import Task**. Open
+   `C:\Users\captaintrial\AppData\Local\FPLBot\CaptainCloudWorker01\Captain-Worker-NoPost.xml`.
+2. Set Name to `Captain-Worker-NoPost`. On General, verify the existing
+   `captaintrial` account, **Run whether user is logged on or not**, **Do not store
+   password** unchecked, and **Run with highest privileges** unchecked.
+3. Check the single trigger is **At startup**, delayed 30 seconds; the action uses
+   the existing trial venv Python, `fpl_bot.captain_worker_cli`, the new config,
+   and the private application directory as Start in.
+4. Check the imported settings: network required, IgnoreNew, no restart, 25-minute
+   limit, demand start disabled. Save with OK. Enter the existing password only
+   in the native Windows dialog. Never put it in PowerShell or chat.
+5. Do not select Run, reboot, or enable the queue/planner. Report successful
+   registration so the subsequent bounded boot/no-assignment proof can be planned.
+
+The password/private Windows interaction is the current pause point. Full Tasks
+delivery, Compute reservations/start/stop reconciliation, Windows unattended
+transport, fresh projection handoff and canonical candidate remain unproven by
+this partial cloud rehearsal. X publisher integration is still excluded.
