@@ -11,6 +11,8 @@ from fpl_bot.cloud_token_store import (
     DEFAULT_TOKEN_METADATA_COLLECTION,
     CloudXTokenStateStoreConfig,
     GoogleCloudXTokenStateStore,
+    RefreshAttempt,
+    RefreshAttemptState,
     deserialize_token_state,
     serialize_token_state,
 )
@@ -90,6 +92,7 @@ class FakeFirestore:
         self.collection_names: list[str] = []
         self.in_transaction = False
         self.fail_transaction: str | None = None
+        self.fail_transaction_after = 0
         self.transaction_calls = 0
 
     def collection(self, name: str) -> FakeCollection:
@@ -107,8 +110,12 @@ class FakeTransactionalWrapper:
 
     def __call__(self, function: Callable[..., Any]) -> Callable[..., Any]:
         def wrapped(transaction: FakeTransaction) -> Any:
-            failure = self._client.fail_transaction
-            self._client.fail_transaction = None
+            if self._client.fail_transaction_after:
+                self._client.fail_transaction_after -= 1
+                failure = None
+            else:
+                failure = self._client.fail_transaction
+                self._client.fail_transaction = None
             if failure == "before":
                 raise RuntimeError("transaction unavailable")
             self._client.in_transaction = True
@@ -212,13 +219,24 @@ def metadata(
     lease_expiry: datetime | None = None,
 ) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "revision": revision,
         "secret_version_name": current_version or version_name(1),
         "previous_secret_version_name": previous_version,
         "updated_at_utc": NOW - timedelta(hours=1),
         "refresh_lease_owner": lease_owner,
         "refresh_lease_expires_at_utc": lease_expiry,
+        "refresh_attempt_generation": 0 if lease_owner is None else 1,
+        "refresh_attempt": None
+        if lease_owner is None
+        else RefreshAttempt(
+            lease_owner,
+            1,
+            revision,
+            RefreshAttemptState.CLAIMED,
+            NOW - timedelta(minutes=2),
+            NOW - timedelta(minutes=2),
+        ).to_document(),
     }
 
 
@@ -240,13 +258,16 @@ def cloud_store(
     return store, firestore, secret_client
 
 
-def acquire(store: GoogleCloudXTokenStateStore, owner: str = "owner-a"):
-    return store.acquire_refresh_lease(
+def acquire(store: GoogleCloudXTokenStateStore, owner: str = "owner-a", *, dispatch=True):
+    lease = store.acquire_refresh_lease(
         "1",
         owner_id=owner,
         now_utc=NOW,
         expires_at_utc=NOW + timedelta(minutes=1),
     )
+    if lease is not None and dispatch:
+        assert store.begin_refresh_dispatch(lease)
+    return lease
 
 
 def test_reader_uses_firestore_selected_explicit_secret_version() -> None:
@@ -447,14 +468,20 @@ def test_provider_secret_write_failure_releases_no_unconfirmed_access_token() ->
 
     assert refresh.calls == 1
     assert firestore.document.data["revision"] == 1
-    assert firestore.document.data["refresh_lease_owner"] is None
+    assert firestore.document.data["refresh_lease_owner"] == "owner-a"
+    assert firestore.document.data["refresh_attempt"]["state"] == "uncertain"
 
 
 def test_provider_definite_authority_failure_never_releases_candidate_token() -> None:
     expiring = token_state(expires_at=NOW)
     secrets = FakeSecrets({version_name(1): serialize_token_state(expiring)})
     store, firestore, _ = cloud_store(secrets=secrets)
-    secrets.after_add = lambda: setattr(firestore, "fail_transaction", "before")
+
+    def fail_authority_commit():
+        firestore.fail_transaction = "before"
+        firestore.fail_transaction_after = 1  # Candidate binding must commit first.
+
+    secrets.after_add = fail_authority_commit
     provider = RefreshingXAccessTokenProvider(
         store,
         RecordingRefreshClient(),
@@ -469,14 +496,20 @@ def test_provider_definite_authority_failure_never_releases_candidate_token() ->
 
     assert firestore.document.data["revision"] == 1
     assert firestore.document.data["secret_version_name"] == version_name(1)
-    assert firestore.document.data["refresh_lease_owner"] is None
+    assert firestore.document.data["refresh_lease_owner"] == "owner-a"
+    assert firestore.document.data["refresh_attempt"]["state"] == "uncertain"
 
 
 def test_provider_uses_candidate_only_after_ambiguous_commit_is_confirmed() -> None:
     expiring = token_state(expires_at=NOW)
     secrets = FakeSecrets({version_name(1): serialize_token_state(expiring)})
     store, firestore, _ = cloud_store(secrets=secrets)
-    secrets.after_add = lambda: setattr(firestore, "fail_transaction", "after")
+
+    def lose_authority_ack():
+        firestore.fail_transaction = "after"
+        firestore.fail_transaction_after = 1
+
+    secrets.after_add = lose_authority_ack
     provider = RefreshingXAccessTokenProvider(
         store,
         RecordingRefreshClient(),
@@ -500,6 +533,7 @@ def test_unreconciled_ambiguous_authority_never_releases_candidate_token() -> No
 
     def lose_commit_acknowledgement_and_readback() -> None:
         firestore.fail_transaction = "after"
+        firestore.fail_transaction_after = 1
         firestore.document.fail_next_nontransaction_read = True
 
     secrets.after_add = lose_commit_acknowledgement_and_readback
@@ -539,7 +573,12 @@ def test_candidate_version_with_definite_firestore_failure_remains_non_authorita
     store, firestore, secrets = cloud_store()
     lease = acquire(store)
     assert lease is not None
-    firestore.fail_transaction = "before"
+
+    def fail_authority_commit():
+        firestore.fail_transaction = "before"
+        firestore.fail_transaction_after = 1
+
+    secrets.after_add = fail_authority_commit
 
     with pytest.raises(XTokenAuthorityPersistenceError) as captured:
         store.replace_if_revision_with_lease(lease, token_state())
@@ -550,10 +589,15 @@ def test_candidate_version_with_definite_firestore_failure_remains_non_authorita
 
 
 def test_ambiguous_authority_commit_is_reconciled_by_firestore_reread() -> None:
-    store, firestore, _ = cloud_store()
+    store, firestore, secrets = cloud_store()
     lease = acquire(store)
     assert lease is not None
-    firestore.fail_transaction = "after"
+
+    def lose_authority_ack():
+        firestore.fail_transaction = "after"
+        firestore.fail_transaction_after = 1
+
+    secrets.after_add = lose_authority_ack
 
     replaced = store.replace_if_revision_with_lease(lease, token_state())
 

@@ -4,6 +4,7 @@ import base64
 import json
 import secrets
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
@@ -140,6 +141,10 @@ class XTokenRefreshCoordinator(Protocol):
 
     def release_refresh_lease(self, lease: XTokenRefreshLease) -> bool: ...
 
+    def begin_refresh_dispatch(self, lease: XTokenRefreshLease) -> bool: ...
+
+    def mark_refresh_uncertain(self, lease: XTokenRefreshLease) -> bool: ...
+
 
 class XOAuthRefreshBoundary(Protocol):
     def refresh(
@@ -265,6 +270,13 @@ class RefreshingXAccessTokenProvider:
         ):
             raise ValueError("refresh_lease_duration must be positive")
         self._store = store
+        if refresh_coordinator is not None and not all(
+            callable(getattr(refresh_coordinator, name, None))
+            for name in ("begin_refresh_dispatch", "mark_refresh_uncertain")
+        ):
+            raise XTokenStoreError("OAuth coordinator lacks durable dispatch protection")
+        if refresh_coordinator is None and callable(getattr(store, "acquire_refresh_lease", None)):
+            raise XTokenStoreError("Distributed OAuth store requires its refresh coordinator")
         self._refresh_coordinator = refresh_coordinator
         self._refresh_client = refresh_client
         self._credentials = credentials
@@ -311,50 +323,33 @@ class RefreshingXAccessTokenProvider:
             return self._use_concurrent_winner(original, now_utc)
 
         try:
-            reconfirmed = self._read_store()
-        except XTokenStoreError:
-            self._release_lease(coordinator, lease, suppress_errors=True)
-            raise
-        if reconfirmed.revision != original.revision:
-            self._release_lease(coordinator, lease)
-            if reconfirmed.state.is_valid_beyond(now_utc, self._refresh_margin):
-                return reconfirmed.state.access_token
-            raise XTokenConcurrencyError(
-                "Concurrent OAuth refresh did not yield usable authoritative token state"
-            )
-
-        try:
-            replacement = self._refresh_client.refresh(reconfirmed.state, self._credentials)
-        except XTokenRefreshError:
-            self._release_lease(coordinator, lease)
-            winner = self._read_store()
-            if winner.revision != original.revision and winner.state.is_valid_beyond(
-                now_utc, self._refresh_margin
-            ):
-                return winner.state.access_token
-            raise
-
-        try:
-            self._require_usable_replacement(replacement, now_utc)
-        except XTokenRefreshError:
-            self._release_lease(coordinator, lease)
-            raise
-        try:
-            replaced = coordinator.replace_if_revision_with_lease(lease, replacement)
-        except XTokenStoreError:
-            self._release_lease(coordinator, lease, suppress_errors=True)
-            raise
+            permitted = coordinator.begin_refresh_dispatch(lease)
         except Exception:
+            # A lost transaction acknowledgement may already have committed dispatch.
+            # Release is safe ONLY if the durable attempt still proves no dispatch.
             self._release_lease(coordinator, lease, suppress_errors=True)
-            raise XTokenStoreError(
-                "Refreshed OAuth token state could not be durably confirmed"
-            ) from None
+            raise XTokenStoreError("OAuth refresh dispatch could not be confirmed") from None
+        if not permitted:
+            self._release_lease(coordinator, lease, suppress_errors=True)
+            raise XTokenConcurrencyError("OAuth refresh dispatch was not authorized")
+
+        try:
+            replacement = self._refresh_client.refresh(original.state, self._credentials)
+            self._require_usable_replacement(replacement, now_utc)
+            replaced = coordinator.replace_if_revision_with_lease(lease, replacement)
+        except Exception as error:
+            # DISPATCHED/PERSISTING already blocks reuse if this audit update fails.
+            with suppress(Exception):
+                coordinator.mark_refresh_uncertain(lease)
+            if isinstance(error, (XTokenRefreshError, XTokenStoreError)):
+                raise
+            raise XTokenStoreError("OAuth refresh outcome requires reconciliation") from None
         if not isinstance(replaced, bool):
-            self._release_lease(coordinator, lease, suppress_errors=True)
+            coordinator.mark_refresh_uncertain(lease)
             raise XTokenStoreError("OAuth token store returned an invalid update result")
         if replaced:
             return replacement.access_token
-        self._release_lease(coordinator, lease, suppress_errors=True)
+        coordinator.mark_refresh_uncertain(lease)
         return self._use_concurrent_winner(original, now_utc)
 
     def _refresh_with_cas(
@@ -429,6 +424,8 @@ class RefreshingXAccessTokenProvider:
     def _read_store(self) -> VersionedXTokenState:
         try:
             snapshot = self._store.read()
+        except (XTokenStoreError, XTokenConcurrencyError):
+            raise
         except Exception:
             raise XTokenStoreError("Authoritative OAuth token state could not be read") from None
         if not isinstance(snapshot, VersionedXTokenState):

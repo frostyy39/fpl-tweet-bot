@@ -516,18 +516,20 @@ Do not store refresh tokens in Firestore.
 configured `X_TOKEN_SECRET_ID`. Firestore collection `x_oauth_token_authority` contains one
 non-secret document named `x-user-{X_EXPECTED_USER_ID}`. That document records the schema,
 monotonic revision, exact authoritative Secret Manager version resource name, previous version,
-UTC update time, and optional refresh lease owner/expiry. It never contains tokens or OAuth client
-credentials.
+UTC update time, optional refresh lease owner/expiry, and non-secret refresh-attempt evidence.
+Authority schema 2 adds an immutable attempt identity/generation, dispatch state and exact
+replacement-version binding. It never contains tokens or OAuth client credentials.
 
 Readers access only the explicit numeric Secret Manager version selected by Firestore. They never
 use `latest` or a version alias: Google documents that an added version is strongly consistent when
 read by its [explicit version number](https://cloud.google.com/secret-manager/docs/reference/consistency),
 but not through `latest` or aliases.
 
-When refresh is required, a Firestore transaction grants a one-minute lease for the current
-revision. The OAuth request then occurs outside the transaction. The validated response is written
-immediately as a new Secret Manager version, after which a second Firestore transaction checks the
-revision and lease owner, advances authority, and clears the lease. Only a confirmed authoritative
+When refresh is required, a Firestore transaction grants a one-minute pre-dispatch claim for the
+current revision. A separate conditional transaction commits the irreversible dispatch barrier
+**before** entering the OAuth HTTP client. The validated response is written as a new Secret Manager
+version and bound durably to that attempt before a conditional authority transaction advances
+the revision and clears the lease. Only a confirmed authoritative
 generation may supply an access token to `/2/users/me` and the posting client. Transaction callback
 retries therefore repeat metadata operations only; they cannot repeat OAuth or X requests.
 
@@ -535,10 +537,17 @@ If Secret Manager storage fails, Firestore authority is unchanged. If Secret Man
 Firestore definitely rejects the transition, the candidate remains non-authoritative. If the
 Firestore outcome is uncertain, the store re-reads authority and accepts the candidate only when
 that exact version and revision are confirmed; otherwise it fails closed and retains the orphan for
-manual reconciliation. A crashed refresher's lease expires, allowing a later invocation to recover.
+manual reconciliation. Expiry is recoverable automatically **only before dispatch**. After possible
+dispatch, failures/abandonment block both consumers regardless of lease expiry. Reconciliation may
+promote only a durably bound exact replacement; unknown/orphaned responses require reviewed manual
+reauthorization rather than retrying the old refresh token.
 After a successful rotation the current and immediately previous versions remain enabled; an older
 superseded version is disabled best-effort. Cleanup failure cannot affect current authority, and no
 potentially authoritative candidate is destroyed.
+
+**Code checkpoint, not a live migration:** the deployed schema-1 Good Luck runtime and schema-2
+coordination are incompatible. Do not deploy shared Captain OAuth or update live authority while
+old consumers remain active. See the [crash boundaries and coordinated rollout gate](docs/shared-x-oauth-crash-safety.md).
 
 The initial deployment bootstrap remains manual: authorize the approved test account with the
 existing local DPAPI helper, add the complete serialized token state securely as the first version

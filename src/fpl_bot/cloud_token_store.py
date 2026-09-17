@@ -7,13 +7,18 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from fpl_bot.x_token_bootstrap import ValidatedLocalTokenState
 
 from fpl_bot.firestore_state import FirestoreClient, TransactionalWrapper
 from fpl_bot.x_errors import (
     XTokenAuthorityPersistenceError,
     XTokenAuthorityUnconfirmedError,
     XTokenBootstrapReconciliationError,
+    XTokenConcurrencyError,
+    XTokenRefreshUncertainError,
     XTokenSecretStorageError,
     XTokenStateError,
     XTokenStoreError,
@@ -25,7 +30,7 @@ from fpl_bot.x_token_refresh import (
 )
 
 TOKEN_PAYLOAD_SCHEMA_VERSION = 1
-TOKEN_METADATA_SCHEMA_VERSION = 1
+TOKEN_METADATA_SCHEMA_VERSION = 2
 DEFAULT_TOKEN_METADATA_COLLECTION = "x_oauth_token_authority"
 DEFAULT_REFRESH_LEASE_DURATION = timedelta(minutes=1)
 
@@ -133,6 +138,46 @@ class _TokenAuthorityMetadata:
     updated_at_utc: datetime
     refresh_lease_owner: str | None
     refresh_lease_expires_at_utc: datetime | None
+    refresh_attempt_generation: int
+    refresh_attempt: "RefreshAttempt | None"
+
+
+class RefreshAttemptState(StrEnum):
+    CLAIMED = "claimed"
+    DISPATCHED = "dispatched"
+    PERSISTING = "persisting"
+    UNCERTAIN = "uncertain"
+    COMMITTED = "committed"
+    RECOVERED = "operator_reauthorized"
+    ABORTED = "aborted_before_dispatch"
+
+
+@dataclass(frozen=True, slots=True)
+class RefreshAttempt:
+    """Non-secret evidence; identity/revision/generation never change within an attempt."""
+
+    attempt_id: str
+    generation: int
+    credential_revision: int
+    state: RefreshAttemptState
+    claimed_at_utc: datetime
+    updated_at_utc: datetime
+    dispatched_at_utc: datetime | None = None
+    candidate_version_name: str | None = None
+    classification: str | None = None
+
+    def to_document(self) -> dict[str, Any]:
+        return {
+            "attempt_id": self.attempt_id,
+            "generation": self.generation,
+            "credential_revision": self.credential_revision,
+            "state": self.state.value,
+            "claimed_at_utc": self.claimed_at_utc,
+            "updated_at_utc": self.updated_at_utc,
+            "dispatched_at_utc": self.dispatched_at_utc,
+            "candidate_version_name": self.candidate_version_name,
+            "classification": self.classification,
+        }
 
 
 class InitialTokenStateStatus(StrEnum):
@@ -172,6 +217,20 @@ class GoogleCloudXTokenStateStore:
 
     def read(self) -> VersionedXTokenState:
         metadata = self._read_metadata()
+        attempt = metadata.refresh_attempt
+        if attempt is not None:
+            if attempt.state is RefreshAttemptState.UNCERTAIN:
+                raise XTokenRefreshUncertainError("OAuth refresh authority requires recovery")
+            if attempt.state in {RefreshAttemptState.DISPATCHED, RefreshAttemptState.PERSISTING}:
+                if metadata.refresh_lease_expires_at_utc <= self._clock():
+                    self.mark_refresh_uncertain(_metadata_lease(metadata))
+                    raise XTokenRefreshUncertainError("Abandoned OAuth refresh requires recovery")
+                raise XTokenConcurrencyError("OAuth refresh is already in progress")
+            if (
+                attempt.state is RefreshAttemptState.CLAIMED
+                and metadata.refresh_lease_expires_at_utc > self._clock()
+            ):
+                raise XTokenConcurrencyError("OAuth refresh is already claimed")
         state = self._access_explicit_version(metadata.secret_version_name)
         return VersionedXTokenState(str(metadata.revision), state)
 
@@ -205,6 +264,8 @@ class GoogleCloudXTokenStateStore:
             "updated_at_utc": updated_at_utc,
             "refresh_lease_owner": None,
             "refresh_lease_expires_at_utc": None,
+            "refresh_attempt_generation": 0,
+            "refresh_attempt": None,
         }
 
         def operation(transaction: _Transaction) -> bool:
@@ -247,6 +308,27 @@ class GoogleCloudXTokenStateStore:
             metadata = self._metadata_in_transaction(transaction)
             if metadata.revision != revision:
                 return False
+            attempt = metadata.refresh_attempt
+            if attempt is not None:
+                if attempt.state in {
+                    RefreshAttemptState.DISPATCHED,
+                    RefreshAttemptState.PERSISTING,
+                    RefreshAttemptState.UNCERTAIN,
+                }:
+                    if (
+                        attempt.state is not RefreshAttemptState.UNCERTAIN
+                        and metadata.refresh_lease_expires_at_utc <= now_utc
+                    ):
+                        document = attempt.to_document()
+                        document.update(
+                            state=RefreshAttemptState.UNCERTAIN.value,
+                            updated_at_utc=now_utc,
+                            classification="outcome_unknown",
+                        )
+                        transaction.update(self._reference, {"refresh_attempt": document})
+                    return False
+                if attempt.attempt_id == owner_id:
+                    return False  # An old attempt identity cannot authorize a fresh dispatch.
             if (
                 metadata.refresh_lease_owner is not None
                 and metadata.refresh_lease_expires_at_utc is not None
@@ -258,6 +340,15 @@ class GoogleCloudXTokenStateStore:
                 {
                     "refresh_lease_owner": owner_id,
                     "refresh_lease_expires_at_utc": expires_at_utc,
+                    "refresh_attempt_generation": metadata.refresh_attempt_generation + 1,
+                    "refresh_attempt": RefreshAttempt(
+                        owner_id,
+                        metadata.refresh_attempt_generation + 1,
+                        revision,
+                        RefreshAttemptState.CLAIMED,
+                        now_utc,
+                        now_utc,
+                    ).to_document(),
                 },
             )
             return True
@@ -270,6 +361,71 @@ class GoogleCloudXTokenStateStore:
             raise XTokenStoreError("OAuth refresh lease transaction returned an invalid result")
         return XTokenRefreshLease(expected_revision, owner_id, expires_at_utc) if acquired else None
 
+    def begin_refresh_dispatch(self, lease: XTokenRefreshLease) -> bool:
+        """Commit the irreversible no-reuse barrier BEFORE entering the HTTP client."""
+        return self._transition_refresh(
+            lease,
+            {RefreshAttemptState.CLAIMED},
+            RefreshAttemptState.DISPATCHED,
+            require_live_lease=True,
+        )
+
+    def mark_refresh_uncertain(self, lease: XTokenRefreshLease) -> bool:
+        return self._transition_refresh(
+            lease,
+            {
+                RefreshAttemptState.DISPATCHED,
+                RefreshAttemptState.PERSISTING,
+                RefreshAttemptState.UNCERTAIN,
+            },
+            RefreshAttemptState.UNCERTAIN,
+            classification="outcome_unknown",
+        )
+
+    def _transition_refresh(
+        self,
+        lease: XTokenRefreshLease,
+        allowed: set[RefreshAttemptState],
+        state: RefreshAttemptState,
+        *,
+        require_live_lease: bool = False,
+        classification: str | None = None,
+        candidate_version: str | None = None,
+    ) -> bool:
+        _require_lease(lease)
+        now = self._clock()
+        _require_utc(now, "OAuth refresh transition time")
+
+        def operation(transaction: _Transaction) -> bool:
+            metadata = self._metadata_in_transaction(transaction)
+            attempt = metadata.refresh_attempt
+            if (
+                not _owns_attempt(metadata, lease)
+                or attempt.state not in allowed
+                or (require_live_lease and lease.expires_at_utc <= now)
+            ):
+                return False
+            document = attempt.to_document()
+            document.update(state=state.value, updated_at_utc=now, classification=classification)
+            if state is RefreshAttemptState.DISPATCHED:
+                document["dispatched_at_utc"] = now
+            if candidate_version is not None:
+                self._config.validate_version_name(candidate_version)
+                if attempt.candidate_version_name is not None:
+                    return False
+                document["candidate_version_name"] = candidate_version
+            transaction.update(self._reference, {"refresh_attempt": document})
+            return True
+
+        try:
+            result = self._transactional(operation)(self._firestore_client.transaction())
+        except Exception:
+            # Never proceed to HTTP on an unknown dispatch-commit outcome.
+            raise XTokenStoreError("OAuth refresh transition could not be confirmed") from None
+        if not isinstance(result, bool):
+            raise XTokenStoreError("OAuth refresh transition returned an invalid result")
+        return result
+
     def release_refresh_lease(self, lease: XTokenRefreshLease) -> bool:
         _require_lease(lease)
         revision = _parse_revision(lease.expected_revision)
@@ -280,11 +436,22 @@ class GoogleCloudXTokenStateStore:
                 return True
             if metadata.refresh_lease_owner != lease.owner_id:
                 return False
+            if not _owns_attempt(metadata, lease):
+                return False
+            if metadata.refresh_attempt.state is not RefreshAttemptState.CLAIMED:
+                return False  # Expiry/release is NEVER evidence of failed provider rotation.
+            attempt = metadata.refresh_attempt.to_document()
+            attempt.update(
+                state=RefreshAttemptState.ABORTED.value,
+                updated_at_utc=self._clock(),
+                classification="pre_dispatch_aborted",
+            )
             transaction.update(
                 self._reference,
                 {
                     "refresh_lease_owner": None,
                     "refresh_lease_expires_at_utc": None,
+                    "refresh_attempt": attempt,
                 },
             )
             return True
@@ -357,19 +524,44 @@ class GoogleCloudXTokenStateStore:
         replacement: XOAuthTokenState,
         lease: XTokenRefreshLease | None,
         candidate_version: str | None = None,
+        recovery_attempt_id: str | None = None,
     ) -> bool:
         if not isinstance(replacement, XOAuthTokenState):
             raise XTokenStateError("Replacement OAuth token state is invalid")
         before = self._read_metadata()
         if before.revision != expected_revision:
             return False
-        if lease is None and before.refresh_lease_owner is not None:
+        if recovery_attempt_id is not None and not _recoverable_attempt(
+            before, recovery_attempt_id
+        ):
+            return False
+        if lease is None and before.refresh_lease_owner is not None and recovery_attempt_id is None:
             return False
         if lease is not None and before.refresh_lease_owner != lease.owner_id:
             return False
 
+        if lease is not None:
+            if not _owns_attempt(before, lease):
+                return False
+            if candidate_version is None:
+                if not self._transition_refresh(
+                    lease,
+                    {RefreshAttemptState.DISPATCHED},
+                    RefreshAttemptState.PERSISTING,
+                ):
+                    return False
+            elif before.refresh_attempt.candidate_version_name != candidate_version:
+                return False
+
         if candidate_version is None:
             candidate_version = self._add_secret_version(replacement)
+            if lease is not None and not self._transition_refresh(
+                lease,
+                {RefreshAttemptState.PERSISTING},
+                RefreshAttemptState.PERSISTING,
+                candidate_version=candidate_version,
+            ):
+                raise XTokenAuthorityUnconfirmedError(candidate_version)
         else:
             self._config.validate_version_name(candidate_version)
         updated_at_utc = self._clock()
@@ -380,14 +572,34 @@ class GoogleCloudXTokenStateStore:
             if current.revision != expected_revision:
                 return False
             if lease is None:
-                if current.refresh_lease_owner is not None:
+                if recovery_attempt_id is not None:
+                    if not _recoverable_attempt(current, recovery_attempt_id):
+                        return False
+                elif current.refresh_lease_owner is not None:
                     return False
             elif (
-                current.refresh_lease_owner != lease.owner_id
-                or current.refresh_lease_expires_at_utc != lease.expires_at_utc
-                or lease.expires_at_utc <= updated_at_utc
+                not _owns_attempt(current, lease)
+                or current.refresh_attempt.state
+                not in {
+                    RefreshAttemptState.PERSISTING,
+                    RefreshAttemptState.UNCERTAIN,
+                }
+                or current.refresh_attempt.candidate_version_name != candidate_version
             ):
                 return False
+            attempt = current.refresh_attempt if lease is not None or recovery_attempt_id else None
+            attempt_document = None if attempt is None else attempt.to_document()
+            if attempt_document is not None:
+                attempt_document.update(
+                    state=(
+                        RefreshAttemptState.RECOVERED
+                        if recovery_attempt_id
+                        else RefreshAttemptState.COMMITTED
+                    ).value,
+                    candidate_version_name=candidate_version,
+                    updated_at_utc=updated_at_utc,
+                    classification="operator_reauthorized" if recovery_attempt_id else None,
+                )
             transaction.update(
                 self._reference,
                 {
@@ -397,6 +609,7 @@ class GoogleCloudXTokenStateStore:
                     "updated_at_utc": updated_at_utc,
                     "refresh_lease_owner": None,
                     "refresh_lease_expires_at_utc": None,
+                    "refresh_attempt": attempt_document,
                 },
             )
             return True
@@ -426,6 +639,67 @@ class GoogleCloudXTokenStateStore:
             return False
         self._disable_best_effort(before.previous_secret_version_name)
         return True
+
+    def reconcile_refresh_attempt(self) -> bool:
+        """Promote ONLY a durably bound exact candidate; never call X or retry R0."""
+        metadata = self._read_metadata()
+        attempt = metadata.refresh_attempt
+        if attempt is None or attempt.state in {
+            RefreshAttemptState.COMMITTED,
+            RefreshAttemptState.RECOVERED,
+        }:
+            return True
+        if (
+            attempt.state not in {RefreshAttemptState.PERSISTING, RefreshAttemptState.UNCERTAIN}
+            or attempt.candidate_version_name is None
+        ):
+            raise XTokenRefreshUncertainError("OAuth refresh has no proven replacement version")
+        replacement = self._access_explicit_version(attempt.candidate_version_name)
+        return self._persist_and_transition(
+            expected_revision=metadata.revision,
+            replacement=replacement,
+            lease=_metadata_lease(metadata),
+            candidate_version=attempt.candidate_version_name,
+        )
+
+    def recover_uncertain_if_revision(
+        self,
+        expected_revision: str,
+        expected_attempt_id: str,
+        replacement: "ValidatedLocalTokenState",
+        *,
+        consumers_quiesced: bool,
+    ) -> bool:
+        """Privileged operator-only recovery, NOT a worker/runtime or HTTP endpoint.
+
+        Caller must quiesce all consumers and obtain/verify a fresh manual grant first.
+        This explicit attestation is not a substitute for deployment/IAM controls.
+        """
+        from fpl_bot.x_token_bootstrap import ValidatedLocalTokenState
+
+        if (
+            consumers_quiesced is not True
+            or not isinstance(replacement, ValidatedLocalTokenState)
+            or replacement.x_user_id != self._config.expected_user_id
+            or not replacement.state.is_valid_beyond(self._clock(), timedelta(minutes=5))
+        ):
+            raise XTokenStateError("OAuth recovery requires reviewed fresh manual authorization")
+        revision = _parse_revision(expected_revision)
+        before = self._read_metadata()
+        if before.revision != revision or not _recoverable_attempt(before, expected_attempt_id):
+            return False
+        previous = self._access_explicit_version(before.secret_version_name)
+        if secrets.compare_digest(
+            previous.refresh_token.encode(),
+            replacement.state.refresh_token.encode(),
+        ):
+            raise XTokenStateError("OAuth recovery cannot restore an uncertain old refresh token")
+        return self._persist_and_transition(
+            expected_revision=revision,
+            replacement=replacement.state,
+            lease=None,
+            recovery_attempt_id=expected_attempt_id,
+        )
 
     def _reconcile_uncertain_authority(
         self,
@@ -678,9 +952,11 @@ def _parse_metadata(
         "updated_at_utc",
         "refresh_lease_owner",
         "refresh_lease_expires_at_utc",
+        "refresh_attempt_generation",
+        "refresh_attempt",
     }
     if set(raw) != required or raw.get("schema_version") != TOKEN_METADATA_SCHEMA_VERSION:
-        raise XTokenStateError("OAuth token authority metadata has an invalid schema")
+        raise XTokenStateError("OAuth authority schema requires reviewed coordinated migration")
     revision = raw.get("revision")
     if isinstance(revision, bool) or not isinstance(revision, int) or revision <= 0:
         raise XTokenStateError("OAuth token authority revision must be positive")
@@ -699,6 +975,33 @@ def _parse_metadata(
     if lease_owner is not None:
         _require_owner(lease_owner)
         _require_utc(lease_expiry, "OAuth refresh lease expiry")
+    generation = raw.get("refresh_attempt_generation")
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
+        raise XTokenStateError("OAuth refresh attempt generation is invalid")
+    attempt = _parse_attempt(raw.get("refresh_attempt"), config)
+    if attempt is None:
+        if lease_owner is not None:
+            raise XTokenStateError("OAuth lease lacks durable refresh attempt evidence")
+    else:
+        if attempt.generation != generation or attempt.credential_revision > revision:
+            raise XTokenStateError("OAuth refresh attempt generation/revision is inconsistent")
+        active = attempt.state not in {
+            RefreshAttemptState.ABORTED,
+            RefreshAttemptState.COMMITTED,
+            RefreshAttemptState.RECOVERED,
+        }
+        if active:
+            if lease_owner != attempt.attempt_id or attempt.credential_revision != revision:
+                raise XTokenStateError("OAuth active refresh attempt does not own authority")
+            if attempt.candidate_version_name == version_name:
+                raise XTokenStateError("OAuth replacement cannot reuse the old secret version")
+        elif lease_owner is not None:
+            raise XTokenStateError("OAuth terminal refresh attempt retains a lease")
+        if attempt.state in {RefreshAttemptState.COMMITTED, RefreshAttemptState.RECOVERED} and (
+            attempt.candidate_version_name != version_name
+            or attempt.credential_revision + 1 != revision
+        ):
+            raise XTokenStateError("OAuth committed refresh has inconsistent authority")
     return _TokenAuthorityMetadata(
         revision=revision,
         secret_version_name=version_name,
@@ -706,6 +1009,90 @@ def _parse_metadata(
         updated_at_utc=updated_at,
         refresh_lease_owner=lease_owner,
         refresh_lease_expires_at_utc=lease_expiry,
+        refresh_attempt_generation=generation,
+        refresh_attempt=attempt,
+    )
+
+
+def _parse_attempt(raw: Any, config: CloudXTokenStateStoreConfig) -> RefreshAttempt | None:
+    if raw is None:
+        return None
+    fields = set(RefreshAttempt.__dataclass_fields__)
+    if not isinstance(raw, Mapping) or set(raw) != fields:
+        raise XTokenStateError("OAuth refresh attempt has an invalid shape")
+    _require_owner(raw["attempt_id"])
+    for field in ("generation", "credential_revision"):
+        if isinstance(raw[field], bool) or not isinstance(raw[field], int) or raw[field] <= 0:
+            raise XTokenStateError("OAuth refresh attempt identity is invalid")
+    try:
+        state = RefreshAttemptState(raw["state"])
+    except (ValueError, TypeError):
+        raise XTokenStateError("OAuth refresh attempt state is invalid") from None
+    claimed, updated, dispatched = (
+        raw["claimed_at_utc"],
+        raw["updated_at_utc"],
+        raw["dispatched_at_utc"],
+    )
+    _require_utc(claimed, "OAuth refresh claim time")
+    _require_utc(updated, "OAuth refresh update time")
+    if updated < claimed:
+        raise XTokenStateError("OAuth refresh attempt chronology is invalid")
+    pre_dispatch = state in {RefreshAttemptState.CLAIMED, RefreshAttemptState.ABORTED}
+    if pre_dispatch != (dispatched is None):
+        raise XTokenStateError("OAuth refresh attempt dispatch evidence is inconsistent")
+    if dispatched is not None:
+        _require_utc(dispatched, "OAuth refresh dispatch time")
+        if not claimed <= dispatched <= updated:
+            raise XTokenStateError("OAuth refresh attempt dispatch chronology is invalid")
+    candidate = raw["candidate_version_name"]
+    if candidate is not None:
+        config.validate_version_name(candidate)
+        if state not in {
+            RefreshAttemptState.PERSISTING,
+            RefreshAttemptState.UNCERTAIN,
+            RefreshAttemptState.COMMITTED,
+            RefreshAttemptState.RECOVERED,
+        }:
+            raise XTokenStateError("OAuth replacement lacks successful-response evidence")
+    if (
+        state in {RefreshAttemptState.COMMITTED, RefreshAttemptState.RECOVERED}
+        and candidate is None
+    ):
+        raise XTokenStateError("OAuth committed refresh lacks replacement evidence")
+    classification = raw["classification"]
+    expected_classification = {
+        RefreshAttemptState.UNCERTAIN: "outcome_unknown",
+        RefreshAttemptState.ABORTED: "pre_dispatch_aborted",
+        RefreshAttemptState.RECOVERED: "operator_reauthorized",
+    }.get(state)
+    if classification != expected_classification:
+        raise XTokenStateError("OAuth refresh attempt classification is invalid")
+    return RefreshAttempt(**{**raw, "state": state})
+
+
+def _owns_attempt(metadata: _TokenAuthorityMetadata, lease: XTokenRefreshLease) -> bool:
+    return (
+        metadata.revision == _parse_revision(lease.expected_revision)
+        and metadata.refresh_lease_owner == lease.owner_id
+        and metadata.refresh_lease_expires_at_utc == lease.expires_at_utc
+        and metadata.refresh_attempt is not None
+        and metadata.refresh_attempt.attempt_id == lease.owner_id
+    )
+
+
+def _metadata_lease(metadata: _TokenAuthorityMetadata) -> XTokenRefreshLease:
+    return XTokenRefreshLease(
+        str(metadata.revision),
+        metadata.refresh_lease_owner,
+        metadata.refresh_lease_expires_at_utc,
+    )
+
+
+def _recoverable_attempt(metadata: _TokenAuthorityMetadata, attempt_id: str) -> bool:
+    return (
+        metadata.refresh_attempt is not None
+        and metadata.refresh_attempt.attempt_id == attempt_id
+        and metadata.refresh_attempt.state is RefreshAttemptState.UNCERTAIN
     )
 
 

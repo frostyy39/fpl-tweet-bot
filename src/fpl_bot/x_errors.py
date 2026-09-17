@@ -129,6 +129,10 @@ class XTokenConcurrencyError(XTokenError):
     """Raised when a refresh race cannot be reconciled to valid authoritative state."""
 
 
+class XTokenRefreshUncertainError(XTokenStoreError):
+    """A possibly dispatched refresh requires reconciliation or operator recovery."""
+
+
 class XTokenSecretStorageError(XTokenStoreError):
     """Raised when a token generation cannot be stored in Secret Manager."""
 

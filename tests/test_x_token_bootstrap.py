@@ -12,6 +12,8 @@ from fpl_bot.cloud_token_store import (
     CloudXTokenStateStoreConfig,
     GoogleCloudXTokenStateStore,
     InitialTokenStateStatus,
+    RefreshAttempt,
+    RefreshAttemptState,
     serialize_token_state,
 )
 from fpl_bot.x_errors import (
@@ -287,13 +289,15 @@ def test_unexpected_project_secret_or_alias_fails_canonicalization(response_name
 
 def authority_document(version: int = 1) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "revision": version,
         "secret_version_name": version_name(version),
         "previous_secret_version_name": None,
         "updated_at_utc": NOW,
         "refresh_lease_owner": None,
         "refresh_lease_expires_at_utc": None,
+        "refresh_attempt_generation": 0,
+        "refresh_attempt": None,
     }
 
 
@@ -651,12 +655,21 @@ def test_reseed_active_lease_fails_before_secret_generation(tmp_path: Path) -> N
     document = authority_document()
     document["refresh_lease_owner"] = "runtime-refresh-owner"
     document["refresh_lease_expires_at_utc"] = NOW + timedelta(seconds=30)
+    document["refresh_attempt_generation"] = 1
+    document["refresh_attempt"] = RefreshAttempt(
+        "runtime-refresh-owner",
+        1,
+        1,
+        RefreshAttemptState.CLAIMED,
+        NOW,
+        NOW,
+    ).to_document()
     store, _, secrets = cloud_store(
         document=document,
         versions={version_name(1): serialize_token_state(token_state())},
     )
 
-    with pytest.raises(XTokenStoreError, match="lost its authority"):
+    with pytest.raises(XTokenStoreError, match="could not be read"):
         reseed_x_token_state(local_state(tmp_path), store, expected_revision="1")
 
     assert set(secrets.versions) == {version_name(1)}
