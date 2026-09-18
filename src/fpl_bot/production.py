@@ -71,6 +71,7 @@ class ProductionRuntimeConfig:
     gcp_project_id: str
     gcp_project_number: str
     firestore_database_id: str
+    x_oauth_firestore_database_id: str
     deadline_tasks: CloudTasksConfig
     preflight_tasks: CloudTasksConfig
     x_token_secret_id: str
@@ -116,6 +117,7 @@ class ProductionRuntimeConfig:
             gcp_project_id=project_id,
             gcp_project_number=x_cloud.gcp_project_number,
             firestore_database_id=x_cloud.firestore_database_id,
+            x_oauth_firestore_database_id=x_cloud.x_oauth_firestore_database_id,
             deadline_tasks=deadline_tasks,
             preflight_tasks=preflight_tasks,
             x_token_secret_id=x_cloud.x_token_secret_id,
@@ -132,6 +134,7 @@ def create_production_app(
     *,
     fpl_source: FplDataSource | None = None,
     firestore_client: FirestoreClient | None = None,
+    oauth_firestore_client: FirestoreClient | None = None,
     cloud_tasks_client: Any | None = None,
     secret_manager_client: SecretManagerClient | None = None,
     x_transport: XHttpTransport | None = None,
@@ -163,7 +166,11 @@ def create_production_app(
                 expected_user_id=expected_user_id,
                 project_number=config.gcp_project_number,
             ),
-            firestore_client=firestore,
+            firestore_client=(
+                oauth_firestore_client
+                if oauth_firestore_client is not None
+                else _default_oauth_firestore_client(config)
+            ),
             secret_manager_client=(
                 secret_manager_client
                 if secret_manager_client is not None
@@ -246,6 +253,14 @@ def _default_firestore_client(config: ProductionRuntimeConfig) -> FirestoreClien
     return firestore_v1.Client(
         project=config.gcp_project_id,
         database=config.firestore_database_id,
+    )
+
+
+def _default_oauth_firestore_client(config: ProductionRuntimeConfig) -> FirestoreClient:
+    from google.cloud import firestore_v1
+
+    return firestore_v1.Client(
+        project=config.gcp_project_id, database=config.x_oauth_firestore_database_id
     )
 
 

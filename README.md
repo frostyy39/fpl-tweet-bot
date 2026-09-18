@@ -459,6 +459,7 @@ values:
 | `GCP_PROJECT_ID` | Google Cloud project used by Firestore and Cloud Tasks. | No |
 | `GCP_PROJECT_NUMBER` | Numeric identity paired with `GCP_PROJECT_ID` for strict Google resource-name validation. | No |
 | `FIRESTORE_DATABASE_ID` | Firestore database ID; optional, defaults to `(default)`. | No |
+| `X_OAUTH_FIRESTORE_DATABASE_ID` | Required named shared OAuth coordination database, independently of business state; no `(default)` fallback. | No |
 | `CLOUD_TASKS_LOCATION_ID` | Cloud Tasks region, such as the chosen UK-compatible region. | No |
 | `CLOUD_TASKS_QUEUE_ID` | Existing queue that will hold deadline and preflight tasks. | No |
 | `CLOUD_RUN_BASE_URL` | HTTPS origin of the future private Cloud Run service. | No |

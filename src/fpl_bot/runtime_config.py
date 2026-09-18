@@ -18,6 +18,7 @@ from fpl_bot.x_oauth import (
 GCP_PROJECT_ID_VARIABLE = "GCP_PROJECT_ID"
 GCP_PROJECT_NUMBER_VARIABLE = "GCP_PROJECT_NUMBER"
 FIRESTORE_DATABASE_ID_VARIABLE = "FIRESTORE_DATABASE_ID"
+X_OAUTH_FIRESTORE_DATABASE_ID_VARIABLE = "X_OAUTH_FIRESTORE_DATABASE_ID"
 X_TOKEN_SECRET_ID_VARIABLE = "X_TOKEN_SECRET_ID"
 
 DEFAULT_FIRESTORE_DATABASE_ID = "(default)"
@@ -35,6 +36,7 @@ class XCloudRuntimeConfig:
     gcp_project_id: str
     gcp_project_number: str
     firestore_database_id: str
+    x_oauth_firestore_database_id: str
     x_token_secret_id: str
     x_posting: XPostingConfig = field(repr=False)
     x_oauth_credentials: OAuthClientCredentials = field(repr=False)
@@ -66,6 +68,14 @@ class XCloudRuntimeConfig:
             raise ProductionConfigurationError(
                 f"{FIRESTORE_DATABASE_ID_VARIABLE} is not a valid Firestore database ID"
             )
+        oauth_database = required_runtime_value(source, X_OAUTH_FIRESTORE_DATABASE_ID_VARIABLE)
+        if (
+            oauth_database == DEFAULT_FIRESTORE_DATABASE_ID
+            or not FIRESTORE_DATABASE_ID_PATTERN.fullmatch(oauth_database)
+        ):
+            raise ProductionConfigurationError(
+                f"{X_OAUTH_FIRESTORE_DATABASE_ID_VARIABLE} must explicitly name an OAuth database"
+            )
         x_posting = XPostingConfig.from_environment(source)
         expected_user_id = x_posting.require_configured_identity()
         secret_id = required_runtime_value(source, X_TOKEN_SECRET_ID_VARIABLE)
@@ -88,6 +98,7 @@ class XCloudRuntimeConfig:
             gcp_project_id=project_id,
             gcp_project_number=project_number,
             firestore_database_id=database_id,
+            x_oauth_firestore_database_id=oauth_database,
             x_token_secret_id=secret_id,
             x_posting=x_posting,
             x_oauth_credentials=credentials,

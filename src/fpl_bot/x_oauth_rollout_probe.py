@@ -56,7 +56,7 @@ def main() -> int:
                 project_number=config.gcp_project_number,
             ),
             firestore_client=firestore.Client(
-                project=config.gcp_project_id, database=config.firestore_database_id
+                project=config.gcp_project_id, database=config.x_oauth_firestore_database_id
             ),
             secret_manager_client=secretmanager.SecretManagerServiceClient(),
         )

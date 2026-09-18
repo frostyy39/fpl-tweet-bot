@@ -208,7 +208,7 @@ gcloud run deploy $Service --project=$ProjectId --region=$Region --platform=mana
   --image=$ImageDigest --service-account=$RuntimeEmail --no-allow-unauthenticated `
   --min-instances=0 --max-instances=2 --concurrency=2 --cpu=1 --memory=512Mi `
   --port=8080 --ingress=all `
-  --set-env-vars="GCP_PROJECT_ID=$ProjectId,GCP_PROJECT_NUMBER=$ProjectNumber,FIRESTORE_DATABASE_ID=(default),CLOUD_TASKS_LOCATION_ID=$Region,CLOUD_TASKS_QUEUE_ID=$Queue,CLOUD_RUN_BASE_URL=$SentinelOrigin,CLOUD_TASKS_CALLER_SERVICE_ACCOUNT_EMAIL=$InvokerEmail,CLOUD_TASKS_OIDC_AUDIENCE=$SentinelOrigin,X_ENVIRONMENT=test,X_POSTING_ENABLED=false,X_EXPECTED_USER_ID=$ExpectedXUserId,X_TOKEN_SECRET_ID=$TokenSecret" `
+  --set-env-vars="GCP_PROJECT_ID=$ProjectId,GCP_PROJECT_NUMBER=$ProjectNumber,FIRESTORE_DATABASE_ID=(default),X_OAUTH_FIRESTORE_DATABASE_ID=shared-x-oauth,CLOUD_TASKS_LOCATION_ID=$Region,CLOUD_TASKS_QUEUE_ID=$Queue,CLOUD_RUN_BASE_URL=$SentinelOrigin,CLOUD_TASKS_CALLER_SERVICE_ACCOUNT_EMAIL=$InvokerEmail,CLOUD_TASKS_OIDC_AUDIENCE=$SentinelOrigin,X_ENVIRONMENT=test,X_POSTING_ENABLED=false,X_EXPECTED_USER_ID=$ExpectedXUserId,X_TOKEN_SECRET_ID=$TokenSecret" `
   --set-secrets="X_OAUTH_CLIENT_ID=${StaticClientIdSecret}:1,X_OAUTH_CLIENT_SECRET=${StaticClientSecretSecret}:1"
 ```
 
@@ -288,7 +288,7 @@ $TokenHandoff = "<absolute-path-outside-repository-to-x_test_oauth_tokens.dpapi>
 fpl-bot-x-bootstrap `
   --project-id=$ProjectId `
   --project-number=$ProjectNumber `
-  --database-id="(default)" `
+  --database-id="shared-x-oauth" `
   --secret-id=$TokenSecret `
   --expected-user-id=$ExpectedXUserId `
   --token-file=$TokenHandoff
@@ -338,7 +338,7 @@ $VerificationJob = "fpl-bot-x-oauth-verify"
 gcloud run jobs deploy $VerificationJob --project=$ProjectId --region=$Region `
   --image=$ImageDigest --service-account=$RuntimeEmail `
   --command=fpl-bot-x-verify --tasks=1 --parallelism=1 --max-retries=0 `
-  --set-env-vars="GCP_PROJECT_ID=$ProjectId,GCP_PROJECT_NUMBER=$ProjectNumber,FIRESTORE_DATABASE_ID=(default),CLOUD_TASKS_LOCATION_ID=$Region,CLOUD_TASKS_QUEUE_ID=$Queue,CLOUD_RUN_BASE_URL=$ServiceUrl,CLOUD_TASKS_CALLER_SERVICE_ACCOUNT_EMAIL=$InvokerEmail,CLOUD_TASKS_OIDC_AUDIENCE=$ServiceUrl,X_ENVIRONMENT=test,X_POSTING_ENABLED=false,X_EXPECTED_USER_ID=$ExpectedXUserId,X_TOKEN_SECRET_ID=$TokenSecret" `
+  --set-env-vars="GCP_PROJECT_ID=$ProjectId,GCP_PROJECT_NUMBER=$ProjectNumber,FIRESTORE_DATABASE_ID=(default),X_OAUTH_FIRESTORE_DATABASE_ID=shared-x-oauth,CLOUD_TASKS_LOCATION_ID=$Region,CLOUD_TASKS_QUEUE_ID=$Queue,CLOUD_RUN_BASE_URL=$ServiceUrl,CLOUD_TASKS_CALLER_SERVICE_ACCOUNT_EMAIL=$InvokerEmail,CLOUD_TASKS_OIDC_AUDIENCE=$ServiceUrl,X_ENVIRONMENT=test,X_POSTING_ENABLED=false,X_EXPECTED_USER_ID=$ExpectedXUserId,X_TOKEN_SECRET_ID=$TokenSecret" `
   --set-secrets="X_OAUTH_CLIENT_ID=${StaticClientIdSecret}:1,X_OAUTH_CLIENT_SECRET=${StaticClientSecretSecret}:1"
 
 gcloud run jobs execute $VerificationJob --project=$ProjectId --region=$Region --wait
@@ -403,7 +403,7 @@ authority from the new DPAPI handoff using its exact current revision:
 fpl-bot-x-reseed `
   --project-id=$ProjectId `
   --project-number=$ProjectNumber `
-  --database-id="(default)" `
+  --database-id="shared-x-oauth" `
   --secret-id=$TokenSecret `
   --expected-user-id=$ExpectedXUserId `
   --expected-revision="<read-and-reviewed-current-authority-revision>" `

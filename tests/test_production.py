@@ -58,6 +58,7 @@ def valid_environment() -> dict[str, str]:
         GCP_PROJECT_ID_VARIABLE: "fpl-bot-test",
         GCP_PROJECT_NUMBER_VARIABLE: "123456789012",
         FIRESTORE_DATABASE_ID_VARIABLE: "(default)",
+        "X_OAUTH_FIRESTORE_DATABASE_ID": "shared-x-oauth",
         CLOUD_TASKS_LOCATION_ID_VARIABLE: "europe-west2",
         CLOUD_TASKS_QUEUE_ID_VARIABLE: "deadline-posts",
         CLOUD_RUN_BASE_URL_VARIABLE: "https://fpl-bot-test.example",
@@ -303,6 +304,7 @@ def test_production_factory_constructs_cloud_token_store_without_reading_it(
         firestore_client=MagicMock(),
         cloud_tasks_client=RecordingCloudTasksClient(),
         secret_manager_client=MagicMock(),
+        oauth_firestore_client=MagicMock(),
         x_transport=ForbiddenXTransport(),
         clock=lambda: CHECKER_TIME_UTC,
     )

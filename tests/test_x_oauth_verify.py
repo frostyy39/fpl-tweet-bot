@@ -48,6 +48,7 @@ def valid_environment() -> dict[str, str]:
         "GCP_PROJECT_ID": "fpl-bot-test",
         GCP_PROJECT_NUMBER_VARIABLE: "123456789012",
         "FIRESTORE_DATABASE_ID": "(default)",
+        "X_OAUTH_FIRESTORE_DATABASE_ID": "shared-x-oauth",
         "CLOUD_TASKS_LOCATION_ID": "europe-west2",
         "CLOUD_TASKS_QUEUE_ID": "fpl-deadline",
         "CLOUD_RUN_BASE_URL": "https://fpl-bot-test.example",

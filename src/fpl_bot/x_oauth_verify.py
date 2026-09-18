@@ -194,7 +194,7 @@ def _default_firestore_client(config: XCloudRuntimeConfig) -> FirestoreClient:
 
     return firestore_v1.Client(
         project=config.gcp_project_id,
-        database=config.firestore_database_id,
+        database=config.x_oauth_firestore_database_id,
     )
 
 
