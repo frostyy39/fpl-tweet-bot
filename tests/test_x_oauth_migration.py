@@ -136,3 +136,17 @@ def test_missing_authority_not_initialized():
     with pytest.raises(XTokenStateError):
         migrate(client)
     assert client.document.data is None
+
+
+@pytest.mark.parametrize("change", [{"schema_version": True}, {"revision": True}])
+def test_malformed_actual_legacy_types_rejected(change):
+    client = FakeFirestore({**EXPECT.legacy_document(), **change})
+    with pytest.raises(XTokenStateError):
+        migrate(client)
+
+
+def test_malformed_actual_replay_types_rejected():
+    client = FakeFirestore(EXPECT.migrated_document(CONFIG))
+    client.document.data["refresh_attempt_generation"] = False
+    with pytest.raises(XTokenStateError):
+        migrate(client)

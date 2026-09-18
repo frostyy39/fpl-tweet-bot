@@ -545,9 +545,11 @@ After a successful rotation the current and immediately previous versions remain
 superseded version is disabled best-effort. Cleanup failure cannot affect current authority, and no
 potentially authoritative candidate is destroyed.
 
-**Code checkpoint, not a live migration:** the deployed schema-1 Good Luck runtime and schema-2
-coordination are incompatible. Do not deploy shared Captain OAuth or update live authority while
-old consumers remain active. See the [crash boundaries and coordinated rollout gate](docs/shared-x-oauth-crash-safety.md).
+**Live authority schema 2:** the post-GW5 quiet-window migration and read-only identity
+verification completed on 18 September 2026. Both Good Luck regional services use the corrected
+coordinator; Captain remains paused with no publisher. Schema-1 images are incompatible and must
+not be deployed against migrated state. See the [rollout audit](docs/shared-x-oauth-rollout.md)
+and [crash boundaries](docs/shared-x-oauth-crash-safety.md).
 
 The initial deployment bootstrap remains manual: authorize the approved test account with the
 existing local DPAPI helper, add the complete serialized token state securely as the first version

@@ -76,6 +76,22 @@ def migrate_legacy_authority(
         raw = snapshot.to_dict() if snapshot.exists else None
         if not isinstance(raw, Mapping):
             raise XTokenStateError("Reviewed legacy authority is missing")
+        # Equality alone would accept bools as integers (True == 1). Validate the
+        # actual persisted types, including on replay, before comparing authority.
+        schema = raw.get("schema_version")
+        if type(schema) is not int or schema not in {1, 2}:
+            raise XTokenStateError("Legacy authority schema is invalid")
+        _parse_metadata(
+            raw
+            if schema == 2
+            else {
+                **raw,
+                "schema_version": 2,
+                "refresh_attempt_generation": 0,
+                "refresh_attempt": None,
+            },
+            config,
+        )
         if dict(raw) == migrated:
             return "already_migrated"
         if dict(raw) != expectation.legacy_document():

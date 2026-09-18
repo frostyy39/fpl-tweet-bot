@@ -1,4 +1,8 @@
-# Shared X OAuth crash/ambiguity safety — code checkpoint, not deployed
+# Shared X OAuth crash/ambiguity safety
+
+This document records the original `2332c6b` code checkpoint and its rollout gate.
+The subsequently reviewed post-GW5 migration is now completed; see the
+[live rollout audit](shared-x-oauth-rollout.md). Do not roll back schema-1 images.
 
 This correction is isolated to shared OAuth coordination. It does not change Good
 Luck FPL chronology, scheduling, rendering, posting idempotency, Cloud Tasks,

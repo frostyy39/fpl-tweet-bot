@@ -1,8 +1,9 @@
 # Google Cloud V1 foundation and private deployment
 
-OAuth rollout warning: the shared OAuth schema-2 correction is **not deployed** and is incompatible
-with the existing schema-1 runtime. Do not run deployment/bootstrap steps against live OAuth state
-without the separately reviewed [coordinated rollout](../docs/shared-x-oauth-crash-safety.md).
+OAuth rollout warning: live shared authority is now **schema 2**, following the separately reviewed
+post-GW5 [quiet-window rollout](../docs/shared-x-oauth-rollout.md). Do not deploy schema-1 images,
+re-bootstrap, or rewrite uncertain authority. Existing foundation commands below are historical;
+they do not authorize overwriting migrated state or enabling Captain.
 
 This guide reproduces the Google Cloud foundation and first private, posting-disabled Cloud Run
 deployment for FPL Bot V1. It intentionally stops before Cloud Scheduler creation, mutable OAuth
