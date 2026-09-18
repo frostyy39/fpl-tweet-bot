@@ -5,6 +5,10 @@ post-GW5 [quiet-window rollout](../docs/shared-x-oauth-rollout.md). Do not deplo
 re-bootstrap, or rewrite uncertain authority. Existing foundation commands below are historical;
 they do not authorize overwriting migrated state or enabling Captain.
 
+The shared authority is now in `shared-x-oauth`, independently of business state.
+The former `(default)` OAuth record is retired and must never be resurrected.
+See the [database cutover and effective IAM audit](../docs/shared-x-oauth-database-cutover.md).
+
 This guide reproduces the Google Cloud foundation and first private, posting-disabled Cloud Run
 deployment for FPL Bot V1. It intentionally stops before Cloud Scheduler creation, mutable OAuth
 token bootstrap, or enabling X posting. Run each command from an authenticated `gcloud` session

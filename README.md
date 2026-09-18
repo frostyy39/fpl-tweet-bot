@@ -521,6 +521,10 @@ UTC update time, optional refresh lease owner/expiry, and non-secret refresh-att
 Authority schema 2 adds an immutable attempt identity/generation, dispatch state and exact
 replacement-version binding. It never contains tokens or OAuth client credentials.
 
+The authority lives in the independently configured `X_OAUTH_FIRESTORE_DATABASE_ID`,
+now `shared-x-oauth`; Good Luck business state stays in `(default)`. The retired source
+record cannot authorize refresh. See the [dedicated-database cutover audit](docs/shared-x-oauth-database-cutover.md).
+
 Readers access only the explicit numeric Secret Manager version selected by Firestore. They never
 use `latest` or a version alias: Google documents that an added version is strongly consistent when
 read by its [explicit version number](https://cloud.google.com/secret-manager/docs/reference/consistency),

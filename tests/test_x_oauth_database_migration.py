@@ -181,6 +181,31 @@ def test_business_and_oauth_database_independent(business):
     assert config.x_oauth_firestore_database_id == "shared-x-oauth"
 
 
+def test_sdk_constructors_use_separate_explicit_database_names(monkeypatch):
+    from google.cloud import firestore_v1
+
+    from fpl_bot.x_oauth_verify import _default_firestore_client
+
+    constructed = []
+
+    def client(**kwargs):
+        constructed.append(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(firestore_v1, "Client", client)
+    config = production.ProductionRuntimeConfig.from_environment(disabled_environment())
+    production._default_firestore_client(config)
+    production._default_oauth_firestore_client(config)
+    environment = disabled_environment()
+    environment["FIRESTORE_DATABASE_ID"] = "captain-state"
+    _default_firestore_client(XCloudRuntimeConfig.from_environment(environment))
+    assert [item["database"] for item in constructed] == [
+        "(default)",
+        "shared-x-oauth",
+        "shared-x-oauth",
+    ]
+
+
 def test_production_composition_never_uses_business_client_for_oauth(monkeypatch):
     business, oauth, store = MagicMock(), MagicMock(), MagicMock()
     captured = []
@@ -280,3 +305,61 @@ def test_reproducible_iam_grants_only_named_databases():
     assert "databases/(default)" not in script
     assert "--role=roles/compute" not in script
     assert "--role=roles/owner" not in script
+
+
+def test_good_luck_and_captain_share_relocated_coordinator_and_uncertainty_barrier():
+    from test_cloud_token_store import FakeSecrets, token_state
+
+    from fpl_bot.cloud_token_store import GoogleCloudXTokenStateStore, serialize_token_state
+    from fpl_bot.x_errors import XTokenRefreshUncertainError
+
+    source, destination = Database(deepcopy(RAW)), Database(None)
+    move(source, destination)
+    secrets = FakeSecrets({RAW["secret_version_name"]: serialize_token_state(token_state())})
+    good_luck, captain = [
+        GoogleCloudXTokenStateStore(
+            CONFIG,
+            firestore_client=destination,
+            secret_manager_client=secrets,
+            transactional_wrapper=wrapper,
+            clock=lambda: NOW,
+        )
+        for _ in range(2)
+    ]
+    assert good_luck.read().revision == captain.read().revision == "5"
+    claim = good_luck.acquire_refresh_lease(
+        "5", owner_id="good-luck-consumer", now_utc=NOW, expires_at_utc=NOW + timedelta(minutes=1)
+    )
+    assert claim is not None
+    assert (
+        captain.acquire_refresh_lease(
+            "5", owner_id="captain-consumer", now_utc=NOW, expires_at_utc=NOW + timedelta(minutes=1)
+        )
+        is None
+    )
+    assert good_luck.begin_refresh_dispatch(claim)
+    assert (
+        captain.acquire_refresh_lease(
+            "5",
+            owner_id="captain-later",
+            now_utc=NOW + timedelta(minutes=2),
+            expires_at_utc=NOW + timedelta(minutes=3),
+        )
+        is None
+    )
+    before = len(secrets.access_requests)
+    for consumer in (good_luck, captain):
+        with pytest.raises(XTokenRefreshUncertainError):
+            consumer.read()
+    assert len(secrets.access_requests) == before
+    assert source.document.data["status"] == "retired"
+    retired_store = GoogleCloudXTokenStateStore(
+        CONFIG,
+        firestore_client=source,
+        secret_manager_client=secrets,
+        transactional_wrapper=wrapper,
+        clock=lambda: NOW,
+    )
+    with pytest.raises(XTokenStateError):
+        retired_store.read()
+    assert len(secrets.access_requests) == before

@@ -1,0 +1,68 @@
+# Temporary, non-writing-to-X Job. No secrets or publisher endpoints/configuration.
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: captain-oauth-isolation-probe
+  namespace: fpl-frosty-bot-v1
+spec:
+  template:
+    spec:
+      taskCount: 1
+      parallelism: 1
+      template:
+        spec:
+          serviceAccountName: captain-publisher@fpl-frosty-bot-v1.iam.gserviceaccount.com
+          maxRetries: 0
+          timeoutSeconds: '120'
+          containers:
+            - image: europe-west2-docker.pkg.dev/fpl-frosty-bot-v1/fpl-bot/shared-oauth-database@sha256:093b9800dd37b3943c9ca94123f647682f2b2ad76ae0b84e59d3f3b3f797578b
+              command: [python]
+              args:
+                - '-c'
+                - |
+                  import json, uuid
+                  import google.auth
+                  from google.auth.transport.requests import AuthorizedSession
+                  from google.api_core.exceptions import PermissionDenied
+                  from google.cloud import firestore
+                  from fpl_bot.cloud_token_store import CloudXTokenStateStoreConfig, _parse_metadata
+                  project = 'fpl-frosty-bot-v1'
+                  probe_id = 'cutover-' + uuid.uuid4().hex
+                  evidence = {}
+                  oauth = firestore.Client(project=project, database='shared-x-oauth')
+                  raw = oauth.collection('x_oauth_token_authority').document('x-user-1732468005336907776').get().to_dict()
+                  parsed = _parse_metadata(raw, CloudXTokenStateStoreConfig(project, 'x-oauth-token-state', '1732468005336907776'))
+                  evidence['oauth_revision'] = parsed.revision
+                  for database in ('shared-x-oauth', 'captain-state'):
+                      client = firestore.Client(project=project, database=database)
+                      doc = client.collection('oauth_cutover_iam_probe').document(probe_id)
+                      @firestore.transactional
+                      def operation(transaction):
+                          assert not doc.get(transaction=transaction).exists
+                          transaction.create(doc, {'kind': 'non_secret_iam_probe'})
+                      try:
+                          operation(client.transaction())
+                          assert doc.get().to_dict() == {'kind': 'non_secret_iam_probe'}
+                          evidence[database] = 'read_transaction_write_passed'
+                      finally:
+                          doc.delete()
+                  default = firestore.Client(project=project, database='(default)')
+                  doc = default.collection('oauth_cutover_iam_probe').document(probe_id)
+                  try:
+                      doc.get()
+                  except PermissionDenied:
+                      evidence['default_read'] = 'denied'
+                  else:
+                      raise RuntimeError('Unexpected default database read permission')
+                  try:
+                      doc.create({'kind': 'non_secret_iam_probe'})
+                  except PermissionDenied:
+                      evidence['default_create'] = 'denied'
+                  else:
+                      doc.delete()
+                      raise RuntimeError('Unexpected default database write permission')
+                  credentials, _ = google.auth.default(scopes=['https://www.googleapis.com/auth/cloud-platform'])
+                  response = AuthorizedSession(credentials).get('https://compute.googleapis.com/compute/v1/projects/fpl-frosty-bot-v1/zones/europe-west2-b/instances/captain-browser-london-windows-trial', timeout=10, allow_redirects=False)
+                  assert response.status_code == 403
+                  evidence['compute_inspection'] = 'denied'
+                  print(json.dumps(evidence, sort_keys=True))
