@@ -101,6 +101,13 @@ def test_reproducible_deployment_is_disabled_private_and_not_scheduled():
     assert "X_OAUTH_FIRESTORE_DATABASE_ID=shared-x-oauth" in script
     assert "--no-allow-unauthenticated" in script
     assert "captain-publisher-invoker@" in script
+    assert "captainXTokenVersionWriter" in script
+    assert "secretmanager.versions.add" in script
+    assert "secretmanager.versions.disable" in script
+    assert "secretmanager.versions.get" in script
+    assert "secretmanager.versions.list" in script
+    assert "secretmanager.versions.destroy" not in script
+    assert "secretmanager.versions.enable" not in script
     assert "cloud scheduler" not in script.casefold()
     assert "gcloud tasks" not in script.casefold()
     assert "captain_publisher_runtime:create_app()" in dockerfile

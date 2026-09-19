@@ -13,6 +13,14 @@ $service = 'captain-publisher'
 $runtime = "captain-publisher@$project.iam.gserviceaccount.com"
 $invoker = "captain-publisher-invoker@$project.iam.gserviceaccount.com"
 $origin = "https://$service-$projectNumber.$region.run.app"
+$versionRoleId = 'captainXTokenVersionWriter'
+$versionRole = "projects/$project/roles/$versionRoleId"
+$versionPermissions = @(
+    'secretmanager.versions.add',
+    'secretmanager.versions.disable',
+    'secretmanager.versions.get',
+    'secretmanager.versions.list'
+)
 
 if ($Image -notmatch '^europe-west2-docker\.pkg\.dev/fpl-frosty-bot-v1/captain-images/publisher:[a-f0-9]{40}$') {
     throw 'A Captain-only, commit-tagged publisher image is required.'
@@ -33,8 +41,22 @@ if ($accounts -notcontains $invoker) {
 }
 
 $member = "serviceAccount:$runtime"
+$roles = Cloud iam roles list "--project=$project" '--format=value(name)'
+if ($roles -notcontains $versionRole) {
+    Cloud iam roles create $versionRoleId "--project=$project" '--title=Captain X token version writer' "--permissions=$($versionPermissions -join ',')" '--stage=GA' '--quiet'
+} else {
+    $role = Cloud iam roles describe $versionRoleId "--project=$project" '--format=json' | ConvertFrom-Json
+    if ((Compare-Object @($role.includedPermissions | Sort-Object) @($versionPermissions | Sort-Object))) {
+        throw 'Existing Captain token-version role permissions differ; refusing to broaden it.'
+    }
+}
 Cloud secrets add-iam-policy-binding $TokenSecretId "--project=$project" "--member=$member" '--role=roles/secretmanager.secretAccessor' '--quiet'
-Cloud secrets add-iam-policy-binding $TokenSecretId "--project=$project" "--member=$member" '--role=roles/secretmanager.secretVersionManager' '--quiet'
+$tokenPolicy = Cloud secrets get-iam-policy $TokenSecretId "--project=$project" '--format=json' | ConvertFrom-Json
+$legacyManager = @($tokenPolicy.bindings | Where-Object role -eq 'roles/secretmanager.secretVersionManager' | ForEach-Object members)
+if ($legacyManager -contains $member) {
+    Cloud secrets remove-iam-policy-binding $TokenSecretId "--project=$project" "--member=$member" '--role=roles/secretmanager.secretVersionManager' '--quiet'
+}
+Cloud secrets add-iam-policy-binding $TokenSecretId "--project=$project" "--member=$member" "--role=$versionRole" '--quiet'
 foreach ($secret in @($OAuthClientIdSecret, $OAuthClientSecretSecret)) {
     Cloud secrets add-iam-policy-binding $secret "--project=$project" "--member=$member" '--role=roles/secretmanager.secretAccessor' '--quiet'
 }
