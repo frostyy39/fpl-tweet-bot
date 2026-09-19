@@ -24,7 +24,7 @@ spec:
                   import google.auth
                   from google.auth.transport.requests import AuthorizedSession
                   from google.api_core.exceptions import PermissionDenied
-                  from google.cloud import firestore
+                  from google.cloud import firestore, secretmanager
                   from fpl_bot.cloud_token_store import CloudXTokenStateStoreConfig, _parse_metadata
                   project = 'fpl-frosty-bot-v1'
                   probe_id = 'cutover-' + uuid.uuid4().hex
@@ -33,6 +33,10 @@ spec:
                   raw = oauth.collection('x_oauth_token_authority').document('x-user-1732468005336907776').get().to_dict()
                   parsed = _parse_metadata(raw, CloudXTokenStateStoreConfig(project, 'x-oauth-token-state', '1732468005336907776'))
                   evidence['oauth_revision'] = parsed.revision
+                  payload = secretmanager.SecretManagerServiceClient().access_secret_version(request={'name': parsed.secret_version_name}).payload.data
+                  assert payload
+                  evidence['authoritative_secret_access'] = 'passed_without_output'
+                  del payload
                   for database in ('shared-x-oauth', 'captain-state'):
                       client = firestore.Client(project=project, database=database)
                       doc = client.collection('oauth_cutover_iam_probe').document(probe_id)

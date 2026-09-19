@@ -104,3 +104,7 @@ def test_reproducible_deployment_is_disabled_private_and_not_scheduled():
     assert "cloud scheduler" not in script.casefold()
     assert "gcloud tasks" not in script.casefold()
     assert "captain_publisher_runtime:create_app()" in dockerfile
+    probe = (root / "deploy/shared-oauth-isolation-probe.yaml").read_text(encoding="utf-8")
+    assert "access_secret_version" in probe
+    assert "passed_without_output" in probe
+    assert "payload.data" in probe and "print(payload)" not in probe
