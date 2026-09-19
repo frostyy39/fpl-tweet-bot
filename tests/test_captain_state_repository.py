@@ -466,7 +466,10 @@ def test_state_modules_have_no_production_or_provider_imports():
     allowed = {
         "dataclasses",
         "datetime",
+        "decimal",
         "enum",
+        "hashlib",
+        "json",
         "typing",
         "uuid",
         "functools",

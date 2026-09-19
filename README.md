@@ -573,6 +573,16 @@ acquisition or refresh, `/2/users/me`, exact numeric account-ID verification, an
 standalone test-post runner remains explicitly gated and continues accepting its deliberately
 supplied static `X_USER_ACCESS_TOKEN`; it does not silently opt into unattended refresh.
 
+### Disabled Captain publisher
+
+The Captain publisher is a separate private Cloud Run application, hard-bound to FPLBotTest user
+ID `1732468005336907776`, `captain-state`, and `shared-x-oauth`. It accepts immutable publication
+identities and digests only—never destination IDs or tweet text. It reloads the accepted handoff,
+reconstructs the persisted validated candidate from fresh official FPL data, checks the exact X
+identity, and commits `write_started` before any future X create-Post request. Ambiguous outcomes
+remain blocked from automatic retry. The initial deployment is server-side disabled and has no
+Scheduler or task target. See [the M9 boundary](docs/captain-publisher-m9.md).
+
 ## Container Runtime
 
 The production container serves the existing `create_production_app()` graph through Gunicorn; it

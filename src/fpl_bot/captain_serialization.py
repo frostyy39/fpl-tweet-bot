@@ -23,6 +23,7 @@ from fpl_bot.captain_orchestration_timing import CaptainTiming, utc_text
 from fpl_bot.captain_state import (
     AcquisitionAttempt,
     AttemptStatus,
+    CandidateSelectionEvidence,
     Generation,
     GenerationStatus,
     IntentStatus,
@@ -36,6 +37,7 @@ from fpl_bot.captain_state import (
     StateConflict,
     TaskIntent,
     TaskKind,
+    ValidatedCandidateRecord,
     VmPhase,
     VmUseLease,
 )
@@ -65,6 +67,8 @@ RECORDS = {
         SessionHealthEvidence,
         VmDispatchReservation,
         VmOperation,
+        CandidateSelectionEvidence,
+        ValidatedCandidateRecord,
     )
 }
 ENUMS = {

@@ -21,6 +21,7 @@ from fpl_bot.captain_state import (
     StateConflict,
     TaskIntent,
     TaskKind,
+    ValidatedCandidateRecord,
     VmPhase,
     VmUseLease,
     identity,
@@ -58,6 +59,7 @@ class InMemoryCaptainRepository:
         self._attempts: dict[UUID, AcquisitionAttempt] = {}
         self._generation_attempt: dict[UUID, UUID] = {}
         self._posts: dict[PostKey, PostingRecord] = {}
+        self._candidates: dict[UUID, ValidatedCandidateRecord] = {}
         self._intents: dict[tuple[UUID, TaskKind], TaskIntent] = {}
         self._vm: VmUseLease | None = None
         self._retired_vm: dict[UUID, VmUseLease] = {}
@@ -240,6 +242,38 @@ class InMemoryCaptainRepository:
     @atomic
     def posting(self, key: PostKey) -> PostingRecord:
         return self._posts.get(key, PostingRecord(key))
+
+    @atomic
+    def candidate(self, generation_id: UUID) -> ValidatedCandidateRecord | None:
+        identity(generation_id)
+        return self._candidates.get(generation_id)
+
+    @atomic
+    def accept_candidate(
+        self, candidate: ValidatedCandidateRecord, now: datetime
+    ) -> Mutation[ValidatedCandidateRecord]:
+        if not isinstance(candidate, ValidatedCandidateRecord):
+            raise StateConflict("invalid validated candidate")
+        generation, handoff = self._accepted(candidate.generation_id, now)
+        if (
+            generation.key != candidate.key
+            or generation.assignment.event_code != candidate.event_code
+            or generation.assignment.timing.deadline_utc != candidate.deadline_utc
+            or handoff.attempt_id != candidate.attempt_id
+            or handoff.payload_digest != candidate.handoff_digest
+            or candidate.validated_at_utc > now
+        ):
+            raise StateConflict("validated candidate binding mismatch")
+        existing = self._candidates.get(candidate.generation_id)
+        if existing is not None:
+            if (
+                existing.candidate_digest != candidate.candidate_digest
+                or existing.content_payload() != candidate.content_payload()
+            ):
+                raise StateConflict("immutable validated candidate conflict")
+            return Mutation(existing, False)
+        self._candidates[candidate.generation_id] = candidate
+        return Mutation(candidate, True)
 
     def _accepted(self, generation_id: UUID, now: datetime) -> tuple[Generation, ProjectionHandoff]:
         generation = self._live(generation_id)

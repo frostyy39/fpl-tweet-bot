@@ -17,6 +17,7 @@ from fpl_bot.captain_state import (
     SessionHealthEvidence,
     TaskIntent,
     TaskKind,
+    ValidatedCandidateRecord,
     VmUseLease,
 )
 
@@ -62,6 +63,10 @@ class CaptainPostingRepository(Protocol):
     """Event-keyed posting barrier; atomically checks generation/handoff state as well."""
 
     def posting(self, key: PostKey) -> PostingRecord: ...
+    def candidate(self, generation_id: UUID) -> ValidatedCandidateRecord | None: ...
+    def accept_candidate(
+        self, candidate: ValidatedCandidateRecord, now: datetime
+    ) -> Mutation[ValidatedCandidateRecord]: ...
     def claim_post(
         self, generation_id: UUID, claim_id: UUID, now: datetime
     ) -> Mutation[PostingAttempt]: ...

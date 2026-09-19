@@ -22,7 +22,7 @@ from fpl_bot.captain_http import (
 from fpl_bot.captain_no_post_audit import AuditedValidator, FirestoreNoPostAudit
 from fpl_bot.captain_serialization import to_document
 from fpl_bot.captain_state import GenerationStatus, PostKey, StateConflict, VmPhase
-from fpl_bot.captain_validation import CaptainCandidateValidator
+from fpl_bot.captain_validation import CaptainCandidateValidator, PersistedCandidateValidator
 from fpl_bot.captain_vm_operations import OperationPhase, VmAction
 from fpl_bot.events import parse_events, select_next_event
 
@@ -127,7 +127,9 @@ def compose(
     service = WorkerControllerService(repository, source, clock, config.destination_user_id)
     compute = CaptainComputeReconciler(repository, operations, provider, clock.now)
     driver = NoPostDriver(controller, scheduler, compute)
-    validator = CaptainCandidateValidator(repository, source, clock)
+    validator = PersistedCandidateValidator(
+        CaptainCandidateValidator(repository, source, clock), repository
+    )
     app = create_captain_app(
         service,
         controller,

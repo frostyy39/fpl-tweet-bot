@@ -1,7 +1,10 @@
 """Captain-only immutable state. No provider, browser or posting implementation."""
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import Generic, TypeVar
 from uuid import UUID
@@ -108,6 +111,167 @@ class PostingAttempt:
 class PostingRecord:
     key: PostKey
     attempts: tuple[PostingAttempt, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateSelectionEvidence:
+    source_ordinal: int
+    projection_rank: int
+    official_id: int
+    web_name: str
+    projection: Decimal
+    official_ownership: Decimal
+    fixtures: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.source_ordinal) is not int
+            or self.source_ordinal < 1
+            or type(self.projection_rank) is not int
+            or self.projection_rank < 1
+            or type(self.official_id) is not int
+            or self.official_id < 1
+            or not isinstance(self.web_name, str)
+            or not self.web_name.strip()
+            or not isinstance(self.projection, Decimal)
+            or not self.projection.is_finite()
+            or not isinstance(self.official_ownership, Decimal)
+            or not self.official_ownership.is_finite()
+            or self.official_ownership < 0
+            or type(self.fixtures) is not tuple
+            or not self.fixtures
+            or any(not isinstance(value, str) or not value for value in self.fixtures)
+        ):
+            raise StateConflict("invalid validated selection evidence")
+
+    def payload(self) -> dict:
+        return {
+            "source_ordinal": self.source_ordinal,
+            "projection_rank": self.projection_rank,
+            "official_id": self.official_id,
+            "web_name": self.web_name,
+            "projection": str(self.projection),
+            "official_ownership": str(self.official_ownership),
+            "fixtures": list(self.fixtures),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedCandidateRecord:
+    """Immutable cloud validation evidence; never permission to write by itself."""
+
+    key: PostKey
+    generation_id: UUID
+    attempt_id: UUID
+    handoff_digest: str
+    event_code: str
+    deadline_utc: datetime
+    top_three: tuple[
+        CandidateSelectionEvidence,
+        CandidateSelectionEvidence,
+        CandidateSelectionEvidence,
+    ]
+    differential: CandidateSelectionEvidence
+    tweet: str
+    weighted_length: int
+    validated_at_utc: datetime
+    candidate_digest: str
+
+    def __post_init__(self) -> None:
+        require_utc(self.deadline_utc)
+        require_utc(self.validated_at_utc)
+        identity(self.generation_id)
+        identity(self.attempt_id)
+        if (
+            not isinstance(self.key, PostKey)
+            or not isinstance(self.event_code, str)
+            or not self.event_code
+            or type(self.top_three) is not tuple
+            or len(self.top_three) != 3
+            or not all(isinstance(value, CandidateSelectionEvidence) for value in self.top_three)
+            or not isinstance(self.differential, CandidateSelectionEvidence)
+            or len({value.official_id for value in (*self.top_three, self.differential)}) != 4
+            or not isinstance(self.tweet, str)
+            or not self.tweet
+            or type(self.weighted_length) is not int
+            or not 1 <= self.weighted_length <= 280
+            or not _digest(self.handoff_digest)
+            or not _digest(self.candidate_digest)
+            or self.candidate_digest != self.content_digest()
+        ):
+            raise StateConflict("invalid validated Captain candidate")
+
+    def content_payload(self) -> dict:
+        return candidate_content_payload(
+            self.key,
+            self.generation_id,
+            self.attempt_id,
+            self.handoff_digest,
+            self.event_code,
+            self.deadline_utc,
+            self.top_three,
+            self.differential,
+            self.tweet,
+            self.weighted_length,
+        )
+
+    def content_digest(self) -> str:
+        canonical = json.dumps(
+            self.content_payload(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
+
+
+def _digest(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and value.isascii()
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def candidate_content_payload(
+    key: PostKey,
+    generation_id: UUID,
+    attempt_id: UUID,
+    handoff_digest: str,
+    event_code: str,
+    deadline_utc: datetime,
+    top_three: tuple[
+        CandidateSelectionEvidence,
+        CandidateSelectionEvidence,
+        CandidateSelectionEvidence,
+    ],
+    differential: CandidateSelectionEvidence,
+    tweet: str,
+    weighted_length: int,
+) -> dict:
+    return {
+        "schema_version": 1,
+        "destination_user_id": key.destination_user_id,
+        "post_type": key.post_type,
+        "event_id": key.event_id,
+        "generation_id": str(generation_id),
+        "attempt_id": str(attempt_id),
+        "handoff_digest": handoff_digest,
+        "event_code": event_code,
+        "deadline_utc": deadline_utc.isoformat(),
+        "top_three": [value.payload() for value in top_three],
+        "differential": differential.payload(),
+        "tweet": tweet,
+        "weighted_length": weighted_length,
+    }
+
+
+def candidate_content_digest(*args) -> str:
+    canonical = json.dumps(
+        candidate_content_payload(*args),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 class TaskKind(StrEnum):

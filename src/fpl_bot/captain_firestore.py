@@ -17,6 +17,7 @@ from fpl_bot.captain_state import (
     SessionHealthEvidence,
     TaskIntent,
     TaskKind,
+    ValidatedCandidateRecord,
     VmUseLease,
 )
 from fpl_bot.captain_vm_operations import InMemoryVmOperations, VmAction, VmOperation
@@ -28,6 +29,7 @@ SPECS = {
     "attempts": (UUID, AcquisitionAttempt),
     "generation_attempt": (UUID, UUID),
     "posts": (PostKey, PostingRecord),
+    "candidates": (UUID, ValidatedCandidateRecord),
     "intents": (tuple, TaskIntent),
     "retired_vm": (UUID, VmUseLease),
     "health": (UUID, tuple),
@@ -69,6 +71,7 @@ def _validate_entry(name, key, value):
         "generations": lambda: value.assignment.generation_id,
         "attempts": lambda: value.attempt_id,
         "posts": lambda: value.key,
+        "candidates": lambda: value.generation_id,
         "retired_vm": lambda: value.lease_id,
     }
     if name in bindings and bindings[name]() != key:
@@ -195,6 +198,7 @@ class _Unit:
             "attempts",
             "generation_attempt",
             "posts",
+            "candidates",
             "intents",
             "retired_vm",
             "health",
@@ -318,6 +322,8 @@ for _name in (
     "generation_acquisition",
     "accept",
     "posting",
+    "candidate",
+    "accept_candidate",
     "claim_post",
     "start_write",
     "finish_post",

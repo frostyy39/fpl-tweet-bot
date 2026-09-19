@@ -16,14 +16,17 @@ from fpl_bot.captain_service import build_captain_report
 from fpl_bot.captain_state import (
     AcquisitionAttempt,
     AttemptStatus,
+    CandidateSelectionEvidence,
     Generation,
     GenerationStatus,
     PostingRecord,
     PostingStatus,
     PostKey,
     StateConflict,
+    ValidatedCandidateRecord,
+    candidate_content_digest,
 )
-from fpl_bot.captain_tweet import x_weighted_text_length
+from fpl_bot.captain_tweet import render_fixture, x_weighted_text_length
 from fpl_bot.errors import (
     CaptainFixtureError,
     CaptainPlayerResolutionError,
@@ -108,7 +111,9 @@ class CaptainCandidateValidator:
     def __init__(self, repository: CandidateStateReader, source: OfficialFplSource, clock: Clock):
         self.repository, self.source, self.clock = repository, source, clock
 
-    def _state(self, key: PostKey, handoff: ProjectionHandoff) -> datetime:
+    def _state(
+        self, key: PostKey, handoff: ProjectionHandoff, allowed_claim_id: UUID | None = None
+    ) -> datetime:
         now = self.clock.now()
         require_utc(now)
         if (
@@ -159,7 +164,15 @@ class CaptainCandidateValidator:
                 raise CandidateRejected(ValidationStatus.INVALID_HANDOFF)
             if any(a.status == PostingStatus.SUCCEEDED for a in posting.attempts):
                 raise CandidateRejected(ValidationStatus.ALREADY_POSTED)
-            if any(a.status != PostingStatus.FAILED_BEFORE_WRITE for a in posting.attempts):
+            active = tuple(
+                a for a in posting.attempts if a.status != PostingStatus.FAILED_BEFORE_WRITE
+            )
+            if active and not (
+                len(active) == 1
+                and allowed_claim_id is not None
+                and active[0].claim_id == allowed_claim_id
+                and active[0].status == PostingStatus.CLAIMED
+            ):
                 raise CandidateRejected(ValidationStatus.POSTING_BLOCKED)
         except CandidateRejected:
             raise
@@ -167,8 +180,10 @@ class CaptainCandidateValidator:
             raise CandidateRejected(ValidationStatus.INVALID_HANDOFF) from None
         return now
 
-    def validate(self, key: PostKey, handoff: ProjectionHandoff) -> ValidatedCaptainCandidate:
-        now = self._state(key, handoff)
+    def validate(
+        self, key: PostKey, handoff: ProjectionHandoff, *, allowed_claim_id: UUID | None = None
+    ) -> ValidatedCaptainCandidate:
+        now = self._state(key, handoff, allowed_claim_id)
         try:
             bootstrap = self.source.fetch_bootstrap_static()
             event = select_next_event(parse_events(bootstrap["events"]), now=now)
@@ -261,7 +276,7 @@ class CaptainCandidateValidator:
             return ValidatedSelection(ordinal_by_id[element], ranks[element], selection)
 
         validated_at = self._state(
-            key, handoff
+            key, handoff, allowed_claim_id
         )  # Catch supersession, barrier or expiry during fetch.
         return ValidatedCaptainCandidate(
             key,
@@ -275,3 +290,52 @@ class CaptainCandidateValidator:
             x_weighted_text_length(report.tweet),
             validated_at,
         )
+
+
+def candidate_record(candidate: ValidatedCaptainCandidate) -> ValidatedCandidateRecord:
+    """Convert transient validation output into immutable, posting-relevant evidence."""
+
+    def selection(value: ValidatedSelection) -> CandidateSelectionEvidence:
+        official = value.official
+        return CandidateSelectionEvidence(
+            value.source_ordinal,
+            value.projection_rank,
+            official.player.element_id,
+            official.player.web_name,
+            official.projected_points,
+            official.player.selected_by_percent,
+            tuple(render_fixture(fixture) for fixture in official.fixtures),
+        )
+
+    top_three = tuple(selection(value) for value in candidate.top_three)
+    differential = selection(candidate.differential)
+    args = (
+        candidate.key,
+        candidate.assignment.generation_id,
+        candidate.attempt_id,
+        candidate.accepted_handoff_digest,
+        candidate.assignment.event_code,
+        candidate.assignment.timing.deadline_utc,
+        top_three,
+        differential,
+        candidate.tweet,
+        candidate.weighted_length,
+    )
+    return ValidatedCandidateRecord(
+        *args,
+        candidate.validated_at_utc,
+        candidate_content_digest(*args),
+    )
+
+
+class PersistedCandidateValidator:
+    """Persist exact validation evidence before any publisher task may reference it."""
+
+    def __init__(self, validator: CaptainCandidateValidator, repository: object):
+        self.validator, self.repository = validator, repository
+
+    def validate(self, key: PostKey, handoff: ProjectionHandoff) -> ValidatedCaptainCandidate:
+        candidate = self.validator.validate(key, handoff)
+        record = candidate_record(candidate)
+        self.repository.accept_candidate(record, candidate.validated_at_utc)
+        return candidate
