@@ -20,6 +20,10 @@ from fpl_bot.captain_session_health import SessionObservation, summarize_session
 from fpl_bot.captain_state import RefreshObservation, SessionExpiryKind
 from fpl_bot.captain_worker import (
     AcquiredDataset,
+    AcquisitionDiagnosticError,
+    AcquisitionFailureCode,
+    AcquisitionFailureDiagnostic,
+    AcquisitionStage,
     CaptainWorker,
     HandoffReceipt,
     ReceiptStatus,
@@ -265,6 +269,28 @@ def test_errors_are_sanitized_no_partial_handoff(setup, error, expected, capsys)
     assert result.status == expected
     assert "SECRET_SENTINEL" not in repr(result) + repr(client.failures)
     assert not client.submissions and capsys.readouterr().out == ""
+
+
+def test_typed_acquisition_failure_never_creates_handoff_authority(setup):
+    worker, client, acquisition, _ = setup
+    diagnostic = AcquisitionFailureDiagnostic(
+        1,
+        AcquisitionFailureCode.BROWSER_PROCESS_LAUNCH_FAILED,
+        AcquisitionStage.BROWSER_LAUNCH,
+        True,
+        True,
+        False,
+        False,
+        17,
+        "CaptainReviewBrowserError",
+    )
+    acquisition.error = AcquisitionDiagnosticError(diagnostic)
+    result = worker.run()
+    assert result.status == WorkerStatus.ACQUISITION_FAILED
+    assert result.acquisition_failure == diagnostic
+    assert result.handoff is None and result.health is None
+    assert not client.submissions
+    assert client.failures == [WorkerStatus.ACQUISITION_FAILED]
 
 
 def test_authentication_required_dataset(setup):

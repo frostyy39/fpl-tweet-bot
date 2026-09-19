@@ -42,12 +42,59 @@ try {
             if ([DateTimeOffset]::Parse($candidate.started_at_utc).UtcDateTime -ge $boot.ToUniversalTime()) {
                 if ($null -ne $audit) { throw 'Multiple current-boot worker audits' }
                 # Whitelist only non-secret fields. Never forward handoff/browser data.
+                $workerBuildId = [string]$candidate.worker_build_id
+                if ($candidate.schema_version -eq 1 -and [string]::IsNullOrEmpty($workerBuildId)) {
+                    $workerBuildId = 'legacy_unversioned'
+                }
+                if ($workerBuildId -notmatch '^(?:[0-9a-f]{40}|unverified|legacy_unversioned)$') {
+                    throw 'Invalid worker build identity'
+                }
+                $failure = $null
+                if ($null -ne $candidate.acquisition_failure) {
+                    $allowedCodes = @(
+                        'worker_configuration_invalid','browser_executable_unavailable',
+                        'browser_runtime_initialization_failed','browser_process_launch_failed',
+                        'profile_missing_or_inaccessible','profile_in_use',
+                        'filesystem_permission_denied','browser_exited_immediately',
+                        'navigation_failed','review_authentication_required',
+                        'review_application_failure','acquisition_timeout',
+                        'unexpected_internal_failure')
+                    $allowedStages = @(
+                        'worker_configuration','profile_validation','executable_resolution',
+                        'runtime_initialization','profile_ownership','browser_launch',
+                        'browser_running','navigation','review_session','table_processing',
+                        'cleanup','internal')
+                    $allowedClasses = @(
+                        'CaptainReviewBrowserError','FileNotFoundError','PermissionError',
+                        'OSError','InternalError')
+                    if ($candidate.acquisition_failure.schema_version -ne 1 -or
+                        $allowedCodes -notcontains $candidate.acquisition_failure.code -or
+                        $allowedStages -notcontains $candidate.acquisition_failure.stage -or
+                        $allowedClasses -notcontains $candidate.acquisition_failure.exception_class -or
+                        $candidate.acquisition_failure.duration_ms -lt 0 -or
+                        $candidate.acquisition_failure.duration_ms -gt 1800000) {
+                        throw 'Invalid acquisition failure diagnostic'
+                    }
+                    $failure = [ordered]@{
+                        schema_version = 1
+                        code = [string]$candidate.acquisition_failure.code
+                        stage = [string]$candidate.acquisition_failure.stage
+                        browser_executable_resolved = [bool]$candidate.acquisition_failure.browser_executable_resolved
+                        profile_directory_exists = [bool]$candidate.acquisition_failure.profile_directory_exists
+                        browser_process_created = [bool]$candidate.acquisition_failure.browser_process_created
+                        navigation_began = [bool]$candidate.acquisition_failure.navigation_began
+                        duration_ms = [int]$candidate.acquisition_failure.duration_ms
+                        exception_class = [string]$candidate.acquisition_failure.exception_class
+                    }
+                }
                 $audit = [ordered]@{
                     schema_version = $candidate.schema_version; no_post = $candidate.no_post
+                    worker_build_id = $workerBuildId
                     status = $candidate.status; exit_code = $candidate.exit_code
                     started_at_utc = $candidate.started_at_utc; ended_at_utc = $candidate.ended_at_utc
                     handoff_absent = ($null -eq $candidate.handoff)
                     payload_digest_absent = ($null -eq $candidate.payload_digest)
+                    acquisition_failure = $failure
                     strict_utf8 = $true
                     sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
                 }

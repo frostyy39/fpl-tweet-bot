@@ -85,6 +85,106 @@ class WorkerStatus(StrEnum):
     HANDOFF_UNCERTAIN = "handoff_uncertain"
 
 
+class AcquisitionStage(StrEnum):
+    WORKER_CONFIGURATION = "worker_configuration"
+    PROFILE_VALIDATION = "profile_validation"
+    EXECUTABLE_RESOLUTION = "executable_resolution"
+    RUNTIME_INITIALIZATION = "runtime_initialization"
+    PROFILE_OWNERSHIP = "profile_ownership"
+    BROWSER_LAUNCH = "browser_launch"
+    BROWSER_RUNNING = "browser_running"
+    NAVIGATION = "navigation"
+    REVIEW_SESSION = "review_session"
+    TABLE_PROCESSING = "table_processing"
+    CLEANUP = "cleanup"
+    INTERNAL = "internal"
+
+
+class AcquisitionFailureCode(StrEnum):
+    WORKER_CONFIGURATION_INVALID = "worker_configuration_invalid"
+    BROWSER_EXECUTABLE_UNAVAILABLE = "browser_executable_unavailable"
+    BROWSER_RUNTIME_INITIALIZATION_FAILED = "browser_runtime_initialization_failed"
+    BROWSER_PROCESS_LAUNCH_FAILED = "browser_process_launch_failed"
+    PROFILE_MISSING_OR_INACCESSIBLE = "profile_missing_or_inaccessible"
+    PROFILE_IN_USE = "profile_in_use"
+    FILESYSTEM_PERMISSION_DENIED = "filesystem_permission_denied"
+    BROWSER_EXITED_IMMEDIATELY = "browser_exited_immediately"
+    NAVIGATION_FAILED = "navigation_failed"
+    REVIEW_AUTHENTICATION_REQUIRED = "review_authentication_required"
+    REVIEW_APPLICATION_FAILURE = "review_application_failure"
+    ACQUISITION_TIMEOUT = "acquisition_timeout"
+    UNEXPECTED_INTERNAL_FAILURE = "unexpected_internal_failure"
+
+
+_SAFE_EXCEPTION_CLASSES = frozenset(
+    {
+        "CaptainReviewBrowserError",
+        "FileNotFoundError",
+        "PermissionError",
+        "OSError",
+        "InternalError",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class AcquisitionFailureDiagnostic:
+    """Allowlisted, non-secret evidence from the local browser boundary."""
+
+    schema_version: int
+    code: AcquisitionFailureCode
+    stage: AcquisitionStage
+    browser_executable_resolved: bool
+    profile_directory_exists: bool
+    browser_process_created: bool
+    navigation_began: bool
+    duration_ms: int
+    exception_class: str
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 1:
+            raise ValueError("unsupported acquisition diagnostic schema")
+        if not isinstance(self.code, AcquisitionFailureCode) or not isinstance(
+            self.stage, AcquisitionStage
+        ):
+            raise ValueError("invalid acquisition diagnostic classification")
+        if any(
+            type(value) is not bool
+            for value in (
+                self.browser_executable_resolved,
+                self.profile_directory_exists,
+                self.browser_process_created,
+                self.navigation_began,
+            )
+        ):
+            raise ValueError("invalid acquisition diagnostic evidence")
+        if type(self.duration_ms) is not int or not 0 <= self.duration_ms <= 1_800_000:
+            raise ValueError("invalid acquisition diagnostic duration")
+        if self.exception_class not in _SAFE_EXCEPTION_CLASSES:
+            raise ValueError("unsafe acquisition diagnostic exception class")
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "code": self.code.value,
+            "stage": self.stage.value,
+            "browser_executable_resolved": self.browser_executable_resolved,
+            "profile_directory_exists": self.profile_directory_exists,
+            "browser_process_created": self.browser_process_created,
+            "navigation_began": self.navigation_began,
+            "duration_ms": self.duration_ms,
+            "exception_class": self.exception_class,
+        }
+
+
+class AcquisitionDiagnosticError(Exception):
+    """Carries only an already-sanitized browser failure diagnostic."""
+
+    def __init__(self, diagnostic: AcquisitionFailureDiagnostic) -> None:
+        self.diagnostic = diagnostic
+        super().__init__(diagnostic.code.value)
+
+
 class WorkerClock(Protocol):
     def now(self) -> datetime: ...
 
@@ -136,6 +236,7 @@ class WorkerResult:
     status: WorkerStatus
     handoff: ProjectionHandoff | None = None
     health: SessionHealthEvidence | None = None
+    acquisition_failure: AcquisitionFailureDiagnostic | None = None
 
     @property
     def exit_code(self) -> int:
@@ -185,10 +286,15 @@ class CaptainWorker:
         self._used_runs.add(run_id)
         work = None
 
-        def fail(status: WorkerStatus, handoff=None, health=None) -> WorkerResult:
+        def fail(
+            status: WorkerStatus,
+            handoff=None,
+            health=None,
+            acquisition_failure: AcquisitionFailureDiagnostic | None = None,
+        ) -> WorkerResult:
             with suppress(Exception):  # Never log arbitrary transport/credential exceptions.
                 self.client.report_failure(work, run_id, status)
-            return WorkerResult(status, handoff, health)
+            return WorkerResult(status, handoff, health, acquisition_failure)
 
         if self.current_user().casefold() != self.expected_user.casefold():
             return fail(WorkerStatus.IDENTITY_MISMATCH)
@@ -267,6 +373,13 @@ class CaptainWorker:
                 return fail(WorkerStatus.ACQUISITION_FAILED)
             if any(not started <= o.observed_at <= ended for o in data.observations):
                 return fail(WorkerStatus.ACQUISITION_FAILED)
+        except AcquisitionDiagnosticError as error:
+            return fail(
+                WorkerStatus.AUTHENTICATION_REQUIRED
+                if error.diagnostic.code == AcquisitionFailureCode.REVIEW_AUTHENTICATION_REQUIRED
+                else WorkerStatus.ACQUISITION_FAILED,
+                acquisition_failure=error.diagnostic,
+            )
         except CaptainReviewBrowserError as error:
             return fail(
                 WorkerStatus.AUTHENTICATION_REQUIRED

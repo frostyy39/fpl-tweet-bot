@@ -14,7 +14,9 @@ SCRIPT = Path(__file__).resolve().parents[1] / "deploy/observe-captain-worker-bo
 pytestmark = pytest.mark.skipif(POWERSHELL is None, reason="Windows PowerShell required")
 
 
-def observe(tmp_path, *, principal="captaintrial", invalid_utf8=False, secret=False):
+def observe(
+    tmp_path, *, principal="captaintrial", invalid_utf8=False, secret=False, diagnostic=None
+):
     audit = tmp_path / "audit.json"
     now = datetime.now(UTC).isoformat()
     payload = {
@@ -27,6 +29,12 @@ def observe(tmp_path, *, principal="captaintrial", invalid_utf8=False, secret=Fa
         "handoff": {"forbidden": "SECRET_VALUE"} if secret else None,
         "payload_digest": None,
     }
+    if diagnostic is not None:
+        payload.update(
+            schema_version=2,
+            worker_build_id="a" * 40,
+            acquisition_failure=diagnostic,
+        )
     audit.write_bytes(b"\xff" if invalid_utf8 else json.dumps(payload).encode("utf-8"))
     fixture = str(audit).replace("'", "''")
     source = rf"""
@@ -125,3 +133,45 @@ def test_boot_observer_rejects_unexpected_task_identity(tmp_path):
     result = observe(tmp_path, principal="SYSTEM")
     assert result.returncode == 1
     assert report(result)["observation"] == "task_contract_mismatch"
+
+
+def test_boot_observer_forwards_only_allowlisted_acquisition_diagnostic(tmp_path):
+    diagnostic = {
+        "schema_version": 1,
+        "code": "browser_process_launch_failed",
+        "stage": "browser_launch",
+        "browser_executable_resolved": True,
+        "profile_directory_exists": True,
+        "browser_process_created": False,
+        "navigation_began": False,
+        "duration_ms": 29,
+        "exception_class": "CaptainReviewBrowserError",
+        "ignored_secret": "COOKIE_TOKEN_SENTINEL",
+    }
+    result = observe(tmp_path, diagnostic=diagnostic)
+    data = report(result)
+    assert result.returncode == 0, result.stderr
+    assert data["audit"]["worker_build_id"] == "a" * 40
+    assert data["audit"]["acquisition_failure"] == {
+        key: value for key, value in diagnostic.items() if key != "ignored_secret"
+    }
+    assert "COOKIE_TOKEN_SENTINEL" not in result.stdout + result.stderr
+
+
+def test_boot_observer_rejects_unrecognized_acquisition_diagnostic(tmp_path):
+    result = observe(
+        tmp_path,
+        diagnostic={
+            "schema_version": 1,
+            "code": "arbitrary_failure",
+            "stage": "internal",
+            "browser_executable_resolved": False,
+            "profile_directory_exists": False,
+            "browser_process_created": False,
+            "navigation_began": False,
+            "duration_ms": 0,
+            "exception_class": "InternalError",
+        },
+    )
+    assert result.returncode == 1
+    assert report(result)["observation"] == "observer_failed_closed"

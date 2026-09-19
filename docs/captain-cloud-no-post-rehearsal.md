@@ -410,7 +410,50 @@ contain zero attempts. The publisher remained revision `captain-publisher-00001-
 The recurring Captain planner and queue were returned to PAUSED, temporary tasks/jobs were removed,
 and Good Luck remained revision `fpl-bot-00007-c4n` and healthy.
 
-Validation for this checkpoint: nine offline Windows helper tests, 46 focused
+### Windows diagnostic boundary and next-run gate
+
+The installed startup action loads source directly from the fixed private directory
+`CaptainCloudWorker01`; deploying a controller image does not update that directory. Registration
+evidence ties the prepared worker to checkpoint `0d195cef76520e714411338e772893c54788f0c9`, but that
+legacy bundle predates an embedded build manifest. Its exact on-disk source version therefore cannot
+be re-proven while the VM remains terminated. The original preparation script deliberately refuses
+to overwrite an existing application directory, and there is no reviewed non-interactive updater.
+Consequently another boot would still execute the same generic-diagnostic worker and would be a
+blind retry. No further live rehearsal is permitted until the diagnostic-capable package is installed
+and its immutable build identity is verified.
+
+New worker bundles contain `worker-build.json`, binding the ZIP to its 40-character Git commit. Audit
+schema 2 records that build ID and, on acquisition failure, one allowlisted diagnostic object. It does
+not contain exception messages, paths, environment values, cookie/session data, passwords, bearer
+tokens or X/OAuth material. The diagnostic distinguishes:
+
+- worker configuration, profile validation and exclusive profile ownership;
+- Chrome executable resolution, Playwright/runtime initialization and persistent-context launch;
+- a created browser that exits before first-page readiness;
+- navigation begun versus FPL Review/session/table processing;
+- authentication required, bounded timeout, filesystem denial and sanitized unexpected failure.
+
+The safe evidence is limited to the typed code/stage, four booleans (executable resolved, profile
+directory existed, browser process created, navigation began), bounded duration, and an allowlisted
+exception class. The temporary boot observer independently validates this schema and copies only
+those fields to guest attributes. Invalid or unknown diagnostic data makes the observer fail closed.
+The controller still receives only the existing typed acquisition failure and follows the same
+terminal cleanup path; the diagnostic does not create a handoff, candidate or posting authority.
+
+Updating the fixed application directory currently requires a controlled `captaintrial` maintenance
+session: verify the new ZIP SHA256, ensure the task is not running, Chrome is closed and all profile
+lifecycle markers are absent, then install through a separately reviewed replacement procedure. The
+browser profile must not be copied, replaced or inspected. A SYSTEM startup-script overlay is not an
+accepted update mechanism because it would change ownership/DPAPI assumptions. If the task action or
+registration must change, the existing password must again be supplied only in Task Scheduler's
+native credential dialog. This maintenance step, followed by one cold boot with no RDP, is the next
+safe diagnostic task; it is not performed by this checkpoint.
+
+Diagnostic-checkpoint validation: 84 worker/observer-focused tests, 693 Captain tests and the full
+1,501-test suite passed. Ruff lint and format checks, dependency integrity, static worker import
+closure and Git diff checks also passed.
+
+Earlier infrastructure-checkpoint validation: nine offline Windows helper tests, 46 focused
 runtime/HTTP/adapter/helper tests, 629 Captain tests and 1,338 full-suite tests
 passed. Ruff lint, formatting, dependency integrity and diff checks passed.
 The normal tests use fake CLI/browser/transport inputs and no live Google calls.

@@ -12,6 +12,9 @@ foreach ($module in $modules) {
 }
 Copy-Item -LiteralPath deploy/captain-worker-config.json -Destination "$destination/worker-config.json"
 Copy-Item -LiteralPath deploy/prepare-captain-worker-remote.ps1 -Destination "$destination/prepare-captain-worker-remote.ps1"
+$manifest = @{ schema_version = 1; commit = $head } | ConvertTo-Json -Compress
+[System.IO.File]::WriteAllText(
+    "$destination/worker-build.json", $manifest + "`n", (New-Object System.Text.UTF8Encoding($false)))
 $zip = "$destination.zip"
 Compress-Archive -Path "$destination/*" -DestinationPath $zip -CompressionLevel Optimal
 Get-FileHash -LiteralPath $zip -Algorithm SHA256

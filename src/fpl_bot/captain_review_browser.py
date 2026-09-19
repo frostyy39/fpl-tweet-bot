@@ -376,10 +376,11 @@ class PlaywrightReviewBrowserAcquirer:
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be greater than zero")
+        self.last_stage = "profile_validation"
+        self.last_lifecycle: dict[str, str] = {}
         self._profile_directory = require_dedicated_profile(profile_directory)
         self._timeout_milliseconds = int(timeout_seconds * 1000)
         self.last_navigation_diagnostic: ReviewNavigationDiagnostic | None = None
-        self.last_lifecycle: dict[str, str] = {}
         self._session_observer = session_observer
 
     def _observe_session(self, authentication: AuthenticationStatus) -> None:
@@ -397,24 +398,40 @@ class PlaywrightReviewBrowserAcquirer:
             "started_at_utc": datetime.now(UTC).isoformat(),
             "authentication": "not_checked",
             "ownership": "not_acquired",
+            "executable_resolved": "false",
+            "browser_process_created": "false",
+            "navigation_began": "false",
         }
         try:
+            self.last_stage = "executable_resolution"
             executable = find_stable_chrome_executable()
+            self.last_lifecycle["executable_resolved"] = "true"
+            self.last_stage = "runtime_initialization"
             self.last_lifecycle.update(
                 chrome_executable=str(executable),
                 chrome_version=chrome_version(executable),
                 playwright_version=version("playwright"),
                 keyring=require_keyring(),
             )
+            self.last_stage = "profile_ownership"
             with own_profile(self._profile_directory):
                 self.last_lifecycle["ownership"] = "exclusive"
                 failure = None
+                failure_stage = None
                 try:
                     snapshot = self._acquire(event_id, executable)
                 except CaptainReviewBrowserError as exc:
-                    if exc.category in {"browser_launch_failed", "browser_profile_unclean"}:
+                    if exc.category in {
+                        "browser_launch_failed",
+                        "browser_runtime_initialization_failed",
+                        "browser_exited_immediately",
+                        "browser_navigation_failed",
+                        "browser_profile_unclean",
+                    }:
                         raise
                     failure = exc
+                    failure_stage = self.last_stage
+            self.last_stage = "cleanup"
             self.last_lifecycle.update(ownership="released", authentication="authenticated")
             if failure is not None:
                 self.last_lifecycle["authentication"] = (
@@ -422,7 +439,9 @@ class PlaywrightReviewBrowserAcquirer:
                     if failure.category == "reauthentication_required"
                     else "not_confirmed"
                 )
+                self.last_stage = failure_stage or "internal"
                 raise failure
+            self.last_stage = "table_processing"
             return snapshot
         except PackageNotFoundError:
             raise CaptainReviewBrowserError("browser_dependency_unavailable") from None
@@ -431,6 +450,7 @@ class PlaywrightReviewBrowserAcquirer:
 
     def _acquire(self, event_id: int, executable: Path) -> ReviewPageSnapshot:
         _require_event_id(event_id)
+        self.last_stage = "runtime_initialization"
         try:
             from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
             from playwright.sync_api import sync_playwright
@@ -438,20 +458,41 @@ class PlaywrightReviewBrowserAcquirer:
             raise CaptainReviewBrowserError("browser_dependency_unavailable") from None
 
         try:
-            with sync_playwright() as playwright:
-                context = _launch_stable_chrome_context(
-                    playwright.chromium,
-                    self._profile_directory,
-                    headless=True,
-                    executable=executable,
-                )
+            try:
+                manager = sync_playwright()
+            except Exception:
+                raise CaptainReviewBrowserError("browser_runtime_initialization_failed") from None
+            with manager as playwright:
+                self.last_stage = "browser_launch"
                 try:
-                    page = context.pages[0] if context.pages else context.new_page()
-                    page.goto(
-                        FPL_REVIEW_APP_URL,
-                        wait_until="domcontentloaded",
-                        timeout=self._timeout_milliseconds,
+                    context = _launch_stable_chrome_context(
+                        playwright.chromium,
+                        self._profile_directory,
+                        headless=True,
+                        executable=executable,
                     )
+                except Exception:
+                    raise CaptainReviewBrowserError("browser_launch_failed") from None
+                self.last_lifecycle["browser_process_created"] = "true"
+                self.last_stage = "browser_running"
+                try:
+                    try:
+                        page = context.pages[0] if context.pages else context.new_page()
+                    except Exception:
+                        raise CaptainReviewBrowserError("browser_exited_immediately") from None
+                    self.last_stage = "navigation"
+                    self.last_lifecycle["navigation_began"] = "true"
+                    try:
+                        page.goto(
+                            FPL_REVIEW_APP_URL,
+                            wait_until="domcontentloaded",
+                            timeout=self._timeout_milliseconds,
+                        )
+                    except PlaywrightTimeoutError:
+                        raise CaptainReviewBrowserError("browser_navigation_timeout") from None
+                    except Exception:
+                        raise CaptainReviewBrowserError("browser_navigation_failed") from None
+                    self.last_stage = "review_session"
                     self._observe_session(AuthenticationStatus.NOT_CONFIRMED)
                     try:
                         result = _wait_for_projections_view(
@@ -469,6 +510,7 @@ class PlaywrightReviewBrowserAcquirer:
                     self._observe_session(AuthenticationStatus.AUTHENTICATED)
                     return result.snapshot
                 finally:
+                    self.last_stage = "cleanup"
                     try:
                         context.close()
                     except Exception:

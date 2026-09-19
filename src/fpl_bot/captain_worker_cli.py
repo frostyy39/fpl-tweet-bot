@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import re
 import signal
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,6 +22,24 @@ from fpl_bot.captain_worker_browser import ProvenBrowserAcquisition
 class Clock:
     def now(self):
         return datetime.now(UTC)
+
+
+def _worker_build_id(config_path: Path) -> str:
+    """Read only the package commit marker; never infer version from mutable source."""
+    try:
+        document = json.loads(
+            (config_path.parent / "worker-build.json").read_text(encoding="utf-8")
+        )
+        if set(document) != {"schema_version", "commit"} or document["schema_version"] != 1:
+            return "unverified"
+        commit = document["commit"]
+        return (
+            commit
+            if isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}", commit)
+            else "unverified"
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return "unverified"
 
 
 class BoundedPollingClient:
@@ -75,14 +94,18 @@ def main(argv=None):
             cancelled=stop.is_set,
         ).run()
         audit = {
-            "schema_version": 1,
+            "schema_version": 2,
             "no_post": True,
+            "worker_build_id": _worker_build_id(args.config),
             "started_at_utc": started.isoformat(),
             "ended_at_utc": datetime.now(UTC).isoformat(),
             "status": result.status.value,
             "exit_code": result.exit_code,
             "handoff": result.handoff.to_payload() if result.handoff else None,
             "payload_digest": result.handoff.payload_digest if result.handoff else None,
+            "acquisition_failure": (
+                result.acquisition_failure.to_payload() if result.acquisition_failure else None
+            ),
         }
         with (output / "audit.json").open("x", encoding="utf-8", newline="\n") as stream:
             json.dump(audit, stream, ensure_ascii=False, indent=2)
