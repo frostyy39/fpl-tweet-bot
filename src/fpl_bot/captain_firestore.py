@@ -14,6 +14,7 @@ from fpl_bot.captain_state import (
     IntentStatus,
     PostingRecord,
     PostKey,
+    RehearsalBinding,
     SessionHealthEvidence,
     TaskIntent,
     TaskKind,
@@ -30,6 +31,7 @@ SPECS = {
     "generation_attempt": (UUID, UUID),
     "posts": (PostKey, PostingRecord),
     "candidates": (UUID, ValidatedCandidateRecord),
+    "rehearsals": (UUID, RehearsalBinding),
     "intents": (tuple, TaskIntent),
     "retired_vm": (UUID, VmUseLease),
     "health": (UUID, tuple),
@@ -72,6 +74,7 @@ def _validate_entry(name, key, value):
         "attempts": lambda: value.attempt_id,
         "posts": lambda: value.key,
         "candidates": lambda: value.generation_id,
+        "rehearsals": lambda: value.generation_id,
         "retired_vm": lambda: value.lease_id,
     }
     if name in bindings and bindings[name]() != key:
@@ -199,13 +202,16 @@ class _Unit:
             "generation_attempt",
             "posts",
             "candidates",
+            "rehearsals",
             "intents",
             "retired_vm",
             "health",
         ):
             setattr(repo, "_" + name, self.maps[name])
-        if method == "plan":
+        if method in {"plan", "plan_rehearsal"}:
             assignment, previous = args[1], args[2]
+            if method == "plan_rehearsal":
+                assignment, previous = args[1], args[3]
 
             def existing_assignment():
                 gid = self.maps["assignment_index"].get(assignment.assignment_id)
@@ -314,7 +320,9 @@ def _forward(reference, name):
 # Explicit public API; no arbitrary operation names from persisted input or a transport.
 for _name in (
     "plan",
+    "plan_rehearsal",
     "generation",
+    "rehearsal",
     "current",
     "transition",
     "claim_acquisition",

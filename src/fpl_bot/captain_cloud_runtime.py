@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from flask import jsonify, request
 
@@ -153,6 +154,52 @@ def compose(
             }
         )
 
+    @app.post("/captain/control/rehearsal")
+    def rehearsal():
+        caller = authorizer.authorize(request.headers.get("Authorization", ""), config.origin)
+        if caller.email != config.planner_email:
+            raise PermissionError("planner identity denied")
+        data = request.get_json(force=True)
+        if (
+            type(data) is not dict
+            or set(data)
+            != {
+                "schema_version",
+                "rehearsal_id",
+                "release_utc",
+            }
+            or data["schema_version"] != 1
+        ):
+            raise ValueError("invalid rehearsal request")
+        try:
+            rehearsal_id = UUID(data["rehearsal_id"])
+            release_utc = datetime.fromisoformat(data["release_utc"].replace("Z", "+00:00"))
+        except (AttributeError, TypeError, ValueError):
+            raise ValueError("invalid rehearsal request") from None
+        result = controller.plan_rehearsal(config.destination_user_id, rehearsal_id, release_utc)
+        outcome = driver.advance()
+        binding = repository.rehearsal(result.generation.assignment.generation_id)
+        return jsonify(
+            {
+                "no_post": True,
+                "postable": False,
+                "purpose": binding.purpose,
+                "vm": outcome,
+                "created": result.created,
+                "generation_id": str(result.generation.assignment.generation_id),
+                "event_id": binding.event_id,
+                "official_deadline_utc": binding.official_deadline_utc.isoformat(),
+                "release_utc": binding.rehearsal_release_utc.isoformat(),
+            }
+        )
+
+    @app.post("/captain/control/reconcile")
+    def reconcile():
+        caller = authorizer.authorize(request.headers.get("Authorization", ""), config.origin)
+        if caller.email != config.planner_email:
+            raise PermissionError("planner identity denied")
+        return jsonify({"no_post": True, "postable": False, "vm": driver.advance()})
+
     @app.post("/captain/control/inspect")
     def inspect():
         caller = authorizer.authorize(request.headers.get("Authorization", ""), config.origin)
@@ -163,11 +210,30 @@ def compose(
         )
         generation = repository.current(PostKey(config.destination_user_id, event.event_id))
         lease = repository.vm_use()
+        binding = repository.rehearsal(generation.assignment.generation_id) if generation else None
+        attempt = (
+            repository.generation_acquisition(generation.assignment.generation_id)
+            if generation
+            else None
+        )
         return jsonify(
             {
                 "no_post": True,
                 "database": config.database,
                 "generation": to_document(generation),
+                "rehearsal": to_document(binding),
+                "acquisition": to_document(attempt),
+                "candidate": to_document(
+                    repository.candidate(generation.assignment.generation_id)
+                    if generation
+                    else None
+                ),
+                "posting": to_document(repository.posting(generation.key) if generation else None),
+                "session_health": to_document(
+                    repository.session_health(generation.assignment.generation_id)
+                    if generation
+                    else ()
+                ),
                 "vm_lease": to_document(lease),
                 "operations": [
                     to_document(operations.get(lease.lease_id, action)) for action in VmAction

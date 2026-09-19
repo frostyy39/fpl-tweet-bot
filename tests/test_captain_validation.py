@@ -19,8 +19,12 @@ from fpl_bot.captain_handoff import (
 from fpl_bot.captain_memory_repository import InMemoryCaptainRepository
 from fpl_bot.captain_orchestration_timing import CaptainTiming
 from fpl_bot.captain_state import GenerationStatus as G
-from fpl_bot.captain_state import PostingStatus, PostKey
-from fpl_bot.captain_validation import CandidateRejected, CaptainCandidateValidator
+from fpl_bot.captain_state import PostingStatus, PostKey, RehearsalBinding
+from fpl_bot.captain_validation import (
+    CandidateRejected,
+    CaptainCandidateValidator,
+    PersistedCandidateValidator,
+)
 from fpl_bot.captain_validation import ValidationStatus as V
 
 T = datetime(2026, 9, 18, 15, 30, tzinfo=UTC)
@@ -149,6 +153,31 @@ def test_exact_gw_candidate_and_immutability():
     assert not repo.posting(KEY).attempts  # Validation has no posting/state side effects.
     with pytest.raises(FrozenInstanceError):
         candidate.tweet = "worker tweet"
+
+
+def test_rehearsal_uses_fresh_official_deadline_not_synthetic_worker_window():
+    validator, repo, source, _, handoff = build()
+    generation = repo.generation(handoff.assignment.generation_id)
+    key = PostKey("1", 5)
+    repo._generations[generation.assignment.generation_id] = replace(generation, key=key)
+    del repo._current[KEY]
+    repo._current[key] = generation.assignment.generation_id
+    official_deadline = D + timedelta(days=7)
+    repo._rehearsals[generation.assignment.generation_id] = RehearsalBinding(
+        generation.assignment.generation_id,
+        5,
+        official_deadline,
+        handoff.assignment.timing.release_utc,
+        handoff.assignment.timing.warmup_utc,
+    )
+    source.bootstrap["events"][0]["deadline_time"] = official_deadline.isoformat()
+    candidate = validator.validate(key, handoff)
+    assert candidate.official_deadline_utc == official_deadline
+    assert validation.candidate_record(candidate).deadline_utc == official_deadline
+    persisted = PersistedCandidateValidator(validator, repo).validate(key, handoff)
+    record = repo.candidate(generation.assignment.generation_id)
+    assert persisted == candidate and record.deadline_utc == official_deadline
+    assert repo.posting(key).attempts == ()
 
 
 @pytest.mark.parametrize("kind", ["GW", "BGW", "DGW", "BDGW"])

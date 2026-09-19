@@ -25,6 +25,7 @@ from fpl_bot.captain_state import (
     IntentStatus,
     PostKey,
     RefreshObservation,
+    RehearsalBinding,
     SessionExpiryKind,
     SessionHealthEvidence,
     StateConflict,
@@ -130,6 +131,64 @@ def test_plan_replay_conflict_cas_and_immutable_old_generation(setup):
         repo.transition(a.generation_id, G.PLANNED, G.WARMING, now)
     with pytest.raises(StateConflict):
         repo.acknowledge_intent(a.generation_id, TaskKind.WARMUP)
+
+
+def test_non_postable_rehearsal_binding_is_atomic_replayable_and_blocks_claim(setup):
+    repo, original, _ = setup
+    release_at = original.timing.target_utc
+    assignment = replace(
+        original,
+        assignment_id=UUID(int=101),
+        generation_id=UUID(int=102),
+    )
+    key = PostKey("1", assignment.event_id)
+    binding = RehearsalBinding(
+        assignment.generation_id,
+        assignment.event_id,
+        assignment.timing.deadline_utc + timedelta(days=7),
+        release_at,
+        assignment.timing.warmup_utc,
+    )
+    first = repo.plan_rehearsal(key, assignment, binding, None, binding.created_at_utc)
+    assert first.applied and repo.rehearsal(assignment.generation_id) == binding
+    assert not repo.plan_rehearsal(key, assignment, binding, None, binding.created_at_utc).applied
+    repo.transition(assignment.generation_id, G.PLANNED, G.WARMING, release_at)
+    repo.transition(assignment.generation_id, G.WARMING, G.READY, release_at)
+    repo.transition(assignment.generation_id, G.READY, G.RELEASED, release_at)
+    handoff = payload(assignment)
+    repo.claim_acquisition(assignment.generation_id, handoff.attempt_id, release_at)
+    repo.accept(handoff, handoff.acquisition_ended_utc)
+    with pytest.raises(StateConflict, match="non-postable rehearsal"):
+        repo.claim_post(assignment.generation_id, UUID(int=103), handoff.acquisition_ended_utc)
+    assert repo.posting(key).attempts == ()
+
+
+def test_concurrent_rehearsal_planning_has_one_generation_and_binding(setup):
+    repo, original, _ = setup
+    assignment = replace(
+        original,
+        assignment_id=UUID(int=201),
+        generation_id=UUID(int=202),
+    )
+    key = PostKey("1", assignment.event_id)
+    binding = RehearsalBinding(
+        assignment.generation_id,
+        assignment.event_id,
+        assignment.timing.deadline_utc + timedelta(days=7),
+        assignment.timing.release_utc,
+        assignment.timing.warmup_utc,
+    )
+
+    def plan(_):
+        return repo.plan_rehearsal(key, assignment, binding, None, binding.created_at_utc)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = tuple(pool.map(plan, range(16)))
+    assert sum(result.applied for result in results) == 1
+    assert {result.record.assignment.generation_id for result in results} == {
+        assignment.generation_id
+    }
+    assert repo.rehearsal(assignment.generation_id) == binding
 
 
 @pytest.mark.parametrize("target", list(G))

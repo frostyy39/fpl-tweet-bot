@@ -9,6 +9,7 @@ from uuid import UUID
 from fpl_bot.captain_handoff import CaptainAssignment, ProjectionHandoff
 from fpl_bot.captain_orchestration_timing import require_utc
 from fpl_bot.captain_state import (
+    REHEARSAL_DESTINATION_USER_ID,
     AcquisitionAttempt,
     AttemptStatus,
     Generation,
@@ -17,6 +18,7 @@ from fpl_bot.captain_state import (
     PostingAttempt,
     PostingRecord,
     PostKey,
+    RehearsalBinding,
     SessionHealthEvidence,
     StateConflict,
     TaskIntent,
@@ -60,6 +62,7 @@ class InMemoryCaptainRepository:
         self._generation_attempt: dict[UUID, UUID] = {}
         self._posts: dict[PostKey, PostingRecord] = {}
         self._candidates: dict[UUID, ValidatedCandidateRecord] = {}
+        self._rehearsals: dict[UUID, RehearsalBinding] = {}
         self._intents: dict[tuple[UUID, TaskKind], TaskIntent] = {}
         self._vm: VmUseLease | None = None
         self._retired_vm: dict[UUID, VmUseLease] = {}
@@ -133,6 +136,36 @@ class InMemoryCaptainRepository:
         ):
             self._intents[gid, kind] = TaskIntent(gid, kind, at)
         return Mutation(generation, True)
+
+    @atomic
+    def plan_rehearsal(
+        self,
+        key: PostKey,
+        assignment: CaptainAssignment,
+        binding: RehearsalBinding,
+        expected_current: UUID | None,
+        now: datetime,
+    ) -> Mutation[Generation]:
+        if (
+            not isinstance(binding, RehearsalBinding)
+            or key.destination_user_id != REHEARSAL_DESTINATION_USER_ID
+            or binding.generation_id != assignment.generation_id
+            or binding.event_id != assignment.event_id
+            or binding.rehearsal_release_utc != assignment.timing.release_utc
+            or binding.created_at_utc != now
+        ):
+            raise StateConflict("invalid rehearsal generation binding")
+        existing = self._rehearsals.get(binding.generation_id)
+        if existing is not None and existing != binding:
+            raise StateConflict("immutable rehearsal binding conflict")
+        mutation = self.plan(key, assignment, expected_current, now)
+        self._rehearsals[binding.generation_id] = binding
+        return mutation
+
+    @atomic
+    def rehearsal(self, generation_id: UUID) -> RehearsalBinding | None:
+        self._get(generation_id)
+        return self._rehearsals.get(generation_id)
 
     @atomic
     def generation(self, generation_id: UUID) -> Generation:
@@ -255,10 +288,16 @@ class InMemoryCaptainRepository:
         if not isinstance(candidate, ValidatedCandidateRecord):
             raise StateConflict("invalid validated candidate")
         generation, handoff = self._accepted(candidate.generation_id, now)
+        rehearsal = self._rehearsals.get(candidate.generation_id)
+        expected_deadline = (
+            rehearsal.official_deadline_utc
+            if rehearsal is not None
+            else generation.assignment.timing.deadline_utc
+        )
         if (
             generation.key != candidate.key
             or generation.assignment.event_code != candidate.event_code
-            or generation.assignment.timing.deadline_utc != candidate.deadline_utc
+            or expected_deadline != candidate.deadline_utc
             or handoff.attempt_id != candidate.attempt_id
             or handoff.payload_digest != candidate.handoff_digest
             or candidate.validated_at_utc > now
@@ -289,6 +328,8 @@ class InMemoryCaptainRepository:
         self, generation_id: UUID, claim_id: UUID, now: datetime
     ) -> Mutation[PostingAttempt]:
         identity(claim_id)
+        if generation_id in self._rehearsals:
+            raise StateConflict("non-postable rehearsal cannot claim X publication")
         generation, handoff = self._accepted(generation_id, now)
         record = self.posting(generation.key)
         for prior_record in self._posts.values():

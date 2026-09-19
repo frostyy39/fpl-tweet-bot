@@ -12,11 +12,13 @@ from fpl_bot.captain_handoff import AuthenticationStatus, CaptainAssignment, Pro
 from fpl_bot.captain_orchestration_timing import CaptainTiming, require_utc, utc_text
 from fpl_bot.captain_repository import CaptainRepository
 from fpl_bot.captain_state import (
+    REHEARSAL_DESTINATION_USER_ID,
     Generation,
     GenerationStatus,
     IntentStatus,
     PostingStatus,
     PostKey,
+    RehearsalBinding,
     StateConflict,
     TaskIntent,
     TaskKind,
@@ -241,6 +243,69 @@ class CaptainController:
             )
         return tuple(results)
 
+    def plan_rehearsal(
+        self, destination_user_id: str, rehearsal_id: UUID, release_utc: datetime
+    ) -> PlanResult:
+        """Plan one bounded diagnostic generation against a fresh official event.
+
+        The assignment timing controls only the diagnostic worker window. The
+        immutable binding retains the real official deadline and permanently
+        prevents this generation from becoming posting authority.
+        """
+        require_utc(release_utc)
+        now = self._now()
+        if (
+            destination_user_id != REHEARSAL_DESTINATION_USER_ID
+            or not isinstance(rehearsal_id, UUID)
+            or rehearsal_id.int == 0
+            or not now < release_utc <= now + timedelta(minutes=30)
+        ):
+            raise StateConflict("invalid bounded non-postable rehearsal")
+        events, teams = self._snapshot()
+        event = select_next_event(events, now)
+        code = self._code(event, teams)
+        key = PostKey(destination_user_id, event.event_id)
+        current = self.repository.current(key)
+        previous = current.assignment.generation_id if current else None
+        seed = (
+            f"rehearsal:{rehearsal_id}:{event.event_id}:{code}:"
+            f"{utc_text(event.deadline_utc)}:{utc_text(release_utc)}"
+        )
+        gid = uuid5(NAMESPACE, seed)
+        assignment = CaptainAssignment(
+            uuid5(gid, "assignment"),
+            gid,
+            event.event_id,
+            code,
+            CaptainTiming(release_utc + timedelta(hours=2)),
+        )
+        try:
+            existing = self.repository.generation(gid)
+        except StateConflict:
+            existing = None
+        if existing is not None:
+            binding = self.repository.rehearsal(gid)
+            if (
+                existing.assignment != assignment
+                or self.repository.current(key) != existing
+                or binding is None
+                or binding.event_id != event.event_id
+                or binding.official_deadline_utc != event.deadline_utc
+                or binding.rehearsal_release_utc != release_utc
+            ):
+                raise StateConflict("conflicting rehearsal replay")
+            return PlanResult(existing, False, True, self._warning(existing))
+        binding = RehearsalBinding(
+            gid,
+            event.event_id,
+            event.deadline_utc,
+            release_utc,
+            now,
+        )
+        mutation = self.repository.plan_rehearsal(key, assignment, binding, previous, now)
+        generation = mutation.record
+        return PlanResult(generation, mutation.applied, True, self._warning(generation))
+
     def envelope(self, intent: TaskIntent) -> TaskEnvelope:
         generation = self.repository.generation(intent.generation_id)
         return TaskEnvelope(
@@ -285,11 +350,22 @@ class CaptainController:
 
     def _fresh_match(self, generation: Generation) -> None:
         events, teams = self._snapshot()
-        event = self._next_window(events, self._now())
+        now = self._now()
+        rehearsal = self.repository.rehearsal(generation.assignment.generation_id)
+        event = (
+            select_next_event(events, now)
+            if rehearsal is not None
+            else self._next_window(events, now)
+        )
+        expected_deadline = (
+            rehearsal.official_deadline_utc
+            if rehearsal is not None
+            else generation.assignment.timing.deadline_utc
+        )
         if (
             event is None
             or event.event_id != generation.assignment.event_id
-            or event.deadline_utc != generation.assignment.timing.deadline_utc
+            or event.deadline_utc != expected_deadline
             or self._code(event, teams) != generation.assignment.event_code
         ):
             raise StateConflict("fresh FPL does not match Captain assignment")

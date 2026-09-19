@@ -22,8 +22,9 @@ def candidate_audit(candidate, handoff):
         }
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "classification": "captain_no_post_diagnostic",
+        "purpose": "non_postable_rehearsal",
         "postable": False,
         "destination_user_id": candidate.key.destination_user_id,
         "event_id": candidate.key.event_id,
@@ -31,7 +32,8 @@ def candidate_audit(candidate, handoff):
         "generation_id": str(candidate.assignment.generation_id),
         "attempt_id": str(candidate.attempt_id),
         "handoff_digest": candidate.accepted_handoff_digest,
-        "deadline_utc": candidate.assignment.timing.deadline_utc.isoformat(),
+        "official_deadline_utc": candidate.official_deadline_utc.isoformat(),
+        "rehearsal_release_utc": candidate.assignment.timing.release_utc.isoformat(),
         "target_utc": candidate.assignment.timing.target_utc.isoformat(),
         "validated_at_utc": candidate.validated_at_utc.isoformat(),
         "acquisition_start_utc": handoff.acquisition_started_utc.isoformat(),

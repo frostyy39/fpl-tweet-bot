@@ -93,6 +93,61 @@ def test_tick_plans_and_persists_outbox_without_starting_before_warmup():
     assert all(task.destination_user_id == "1" for task in scheduler.tasks.values())
 
 
+def test_rehearsal_endpoint_creates_one_durable_non_postable_generation():
+    now = D - timedelta(days=1)
+    clock, repo, scheduler = Clock(now), InMemoryCaptainRepository(), Scheduler()
+    app = compose(
+        CONFIG,
+        repo,
+        InMemoryVmOperations(repo),
+        Source(),
+        clock,
+        scheduler,
+        SimpleNamespace(request=lambda *_: pytest.fail("task delivery did not run")),
+        Authorizer(),
+    )
+    body = {
+        "schema_version": 1,
+        "rehearsal_id": str(UUID(int=700)),
+        "release_utc": (now + timedelta(minutes=10)).isoformat().replace("+00:00", "Z"),
+    }
+    client = app.test_client()
+    first = client.post(
+        "/captain/control/rehearsal", json=body, headers={"Authorization": CONFIG.planner_email}
+    )
+    second = client.post(
+        "/captain/control/rehearsal", json=body, headers={"Authorization": CONFIG.planner_email}
+    )
+    assert first.status_code == second.status_code == 200
+    assert first.json["created"] is True and second.json["created"] is False
+    assert first.json["postable"] is False
+    assert first.json["purpose"] == "non_postable_rehearsal"
+    gid = UUID(first.json["generation_id"])
+    assert repo.rehearsal(gid).official_deadline_utc == D
+    assert len(scheduler.tasks) == 3
+    assert repo.posting(repo.generation(gid).key).attempts == ()
+
+
+def test_rehearsal_reconcile_does_not_plan_or_mutate_posting_state():
+    repo, scheduler = InMemoryCaptainRepository(), Scheduler()
+    app = compose(
+        CONFIG,
+        repo,
+        InMemoryVmOperations(repo),
+        Source(),
+        Clock(D - timedelta(days=1)),
+        scheduler,
+        SimpleNamespace(request=lambda *_: pytest.fail("no lease exists")),
+        Authorizer(),
+    )
+    response = app.test_client().post(
+        "/captain/control/reconcile", headers={"Authorization": CONFIG.planner_email}
+    )
+    assert response.status_code == 200
+    assert response.json == {"no_post": True, "postable": False, "vm": "idle"}
+    assert repo.pending_intents() == () and scheduler.tasks == {}
+
+
 def test_worker_cannot_invoke_planner_and_planner_cannot_get_assignment():
     repo = InMemoryCaptainRepository()
     app = compose(

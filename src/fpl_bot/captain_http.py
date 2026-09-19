@@ -86,15 +86,35 @@ class WorkerControllerService:
         require_utc(now)
         return now
 
+    def _fresh_generation(self, assignment):
+        try:
+            event = select_next_event(
+                parse_events(self.source.fetch_bootstrap_static()["events"]), self._now()
+            )
+        except (FplBotError, KeyError, TypeError, ValueError, OSError):
+            return None
+        generation = self.repository.current(PostKey(self.destination_user_id, assignment.event_id))
+        if generation is None or generation.assignment != assignment:
+            return None
+        rehearsal = self.repository.rehearsal(assignment.generation_id)
+        expected_deadline = (
+            rehearsal.official_deadline_utc
+            if rehearsal is not None
+            else assignment.timing.deadline_utc
+        )
+        if event.event_id != assignment.event_id or event.deadline_utc != expected_deadline:
+            return None
+        return generation
+
     def assignment(self, run_id: UUID):
         try:
             event = select_next_event(
                 parse_events(self.source.fetch_bootstrap_static()["events"]), self._now()
             )
-        except (FplBotError, KeyError, TypeError, ValueError):
+        except (FplBotError, KeyError, TypeError, ValueError, OSError):
             return None
         generation = self.repository.current(PostKey(self.destination_user_id, event.event_id))
-        if generation is None or generation.assignment.timing.deadline_utc != event.deadline_utc:
+        if generation is None or self._fresh_generation(generation.assignment) != generation:
             return None
         if generation.status not in {
             GenerationStatus.WARMING,
@@ -109,20 +129,8 @@ class WorkerControllerService:
             raise StateConflict("worker run identity mismatch")
         # External authoritative validation is deliberately outside the later
         # atomic claim. The claim rechecks current generation/attempt state.
-        try:
-            events = parse_events(self.source.fetch_bootstrap_static()["events"])
-            event = select_next_event(events, self._now())
-        except (FplBotError, KeyError, TypeError, ValueError, OSError):
-            return False
-        if (
-            event.event_id != work.assignment.event_id
-            or event.deadline_utc != work.assignment.timing.deadline_utc
-        ):
-            return False
-        generation = self.repository.current(
-            PostKey(self.destination_user_id, work.assignment.event_id)
-        )
-        if generation is None or generation.assignment != work.assignment:
+        generation = self._fresh_generation(work.assignment)
+        if generation is None:
             return False
         now = self._now()
         if now < work.assignment.timing.target_utc:
@@ -146,6 +154,8 @@ class WorkerControllerService:
 
     def handoff(self, handoff: ProjectionHandoff, digest: str, health=None):
         handoff.verify_digest(digest)
+        if self._fresh_generation(handoff.assignment) is None:
+            raise StateConflict("handoff no longer matches fresh official FPL state")
         mutation = self.repository.accept(handoff, self._now())
         if health is not None:
             self.repository.record_session_health(handoff.assignment.generation_id, health)

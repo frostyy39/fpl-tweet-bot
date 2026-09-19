@@ -331,6 +331,40 @@ handoff fabricated, candidate generated, or full Milestone 8 pass claimed.
 The retained paused tasks do not arm that future rehearsal by themselves.
 X publisher integration remains excluded.
 
+## Explicit out-of-window non-postable rehearsal contract
+
+The later full browser rehearsal uses `POST /captain/control/rehearsal`, callable only by the
+existing Captain planner identity. Its versioned request contains a UUID rehearsal identity and a
+bounded release timestamp no more than 30 minutes ahead. The controller fetches the current
+official event, deadline and fixtures, derives the event code, and atomically writes both the
+diagnostic generation and an immutable `non_postable_rehearsal` binding. The binding retains the
+real official deadline separately from the synthetic worker execution window.
+
+This is not a production timing override. Normal generations still use `T=D-2h` and `[T,T+5m]`
+unchanged. Assignment, release, handoff and candidate validation all re-fetch official FPL and
+compare event/deadline with the immutable rehearsal binding. The worker still gets one bounded
+five-minute acquisition window and the ordinary immutable handoff contract.
+
+Independent publication fences are deliberately redundant:
+
+- rehearsal state uses only diagnostic destination `1`, never FPLBotTest;
+- the binding is persisted transactionally with the generation in `captain-state`;
+- `claim_post` rejects a rehearsal generation before creating any posting attempt;
+- the publisher independently rejects any generation carrying a rehearsal binding even if its
+  server-side enablement were accidentally changed;
+- the no-post controller has no X client, credentials, OAuth access, publisher invocation route or
+  arbitrary tweet endpoint;
+- diagnostic candidate audits are schema 2, explicitly `postable=false` and
+  `purpose=non_postable_rehearsal`.
+
+The controlled procedure keeps the recurring planner paused, removes obsolete prior-event tasks,
+creates one rehearsal while the queue is paused, reviews the deterministic task set, resumes the
+queue only for that set, and uses the planner-authenticated
+`POST /captain/control/reconcile` endpoint for bounded asynchronous VM reconciliation without
+planning another generation. The temporary reconciler is removed and the queue paused again after
+authoritative Compute termination. It never turns a rehearsal candidate into a publication
+instruction.
+
 Validation for this checkpoint: nine offline Windows helper tests, 46 focused
 runtime/HTTP/adapter/helper tests, 629 Captain tests and 1,338 full-suite tests
 passed. Ruff lint, formatting, dependency integrity and diff checks passed.

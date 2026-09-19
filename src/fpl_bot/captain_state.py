@@ -12,6 +12,8 @@ from uuid import UUID
 from fpl_bot.captain_handoff import AuthenticationStatus, CaptainAssignment, ProjectionHandoff
 from fpl_bot.captain_orchestration_timing import require_utc
 
+REHEARSAL_DESTINATION_USER_ID = "1"
+
 
 class StateConflict(ValueError):
     """Rejected stale, conflicting or invalid state operation; no mutation occurred."""
@@ -74,6 +76,34 @@ class Generation:
     @property
     def status(self) -> GenerationStatus:
         return self.history[-1][0]
+
+
+@dataclass(frozen=True, slots=True)
+class RehearsalBinding:
+    """Immutable proof that a generation is diagnostic and can never authorize X."""
+
+    generation_id: UUID
+    event_id: int
+    official_deadline_utc: datetime
+    rehearsal_release_utc: datetime
+    created_at_utc: datetime
+    purpose: str = "non_postable_rehearsal"
+
+    def __post_init__(self) -> None:
+        identity(self.generation_id)
+        for value in (
+            self.official_deadline_utc,
+            self.rehearsal_release_utc,
+            self.created_at_utc,
+        ):
+            require_utc(value)
+        if (
+            type(self.event_id) is not int
+            or self.event_id < 1
+            or self.purpose != "non_postable_rehearsal"
+            or self.created_at_utc >= self.rehearsal_release_utc
+        ):
+            raise StateConflict("invalid non-postable rehearsal binding")
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,12 +1,21 @@
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
 
 from fpl_bot.captain_controller import CaptainController, TaskEnvelope
+from fpl_bot.captain_handoff import (
+    AuthenticationStatus,
+    CleanupStatus,
+    CompletenessStatus,
+    ProjectionHandoff,
+    ProjectionRecord,
+    RowCounts,
+)
 from fpl_bot.captain_http import (
     CallerIdentity,
     CaptainAuthConfig,
@@ -125,6 +134,57 @@ def test_authenticated_assignment_and_release_identity_and_time_are_enforced():
         "/captain/worker/release", json={"run_id": str(UUID(int=9)), "work": work}, headers=headers
     )
     assert mismatch.status_code == 409
+
+
+def test_rehearsal_assignment_release_and_handoff_require_fresh_official_binding():
+    source, repo = Source(), InMemoryCaptainRepository()
+    release_at = D - timedelta(days=1)
+    clock = Clock(release_at - timedelta(minutes=10))
+    controller = CaptainController(repo, source, clock, InMemoryVmOperations(repo))
+    generation = controller.plan_rehearsal("1", UUID(int=700), release_at).generation
+    controller.deliver(
+        controller.envelope(repo.task_intent(generation.assignment.generation_id, TaskKind.WARMUP))
+    )
+    repo.transition(
+        generation.assignment.generation_id,
+        GenerationStatus.WARMING,
+        GenerationStatus.READY,
+        clock.value,
+    )
+    service = WorkerControllerService(repo, source, clock, "1")
+    run_id = UUID(int=701)
+    work = service.assignment(run_id)
+    assert work.assignment == generation.assignment
+    assert repo.rehearsal(generation.assignment.generation_id).official_deadline_utc == D
+
+    clock.value = release_at
+    controller.deliver(
+        controller.envelope(repo.task_intent(generation.assignment.generation_id, TaskKind.RELEASE))
+    )
+    assert isinstance(service.release(work, run_id), ReleaseGrant)
+    handoff = ProjectionHandoff(
+        1,
+        generation.assignment,
+        run_id,
+        release_at,
+        release_at,
+        (ProjectionRecord(1, "Player", "TAA", Decimal("5.0")),),
+        RowCounts(1, 1, 0, 1),
+        CompletenessStatus.COMPLETE,
+        AuthenticationStatus.AUTHENTICATED,
+        CleanupStatus.RELEASED,
+    )
+    assert (
+        service.handoff(handoff, handoff.payload_digest).generation_id
+        == generation.assignment.generation_id
+    )
+
+    # Fresh authoritative drift blocks every later replay and cannot overwrite acceptance.
+    source.bootstrap["events"][0]["deadline_time"] = (D + timedelta(hours=1)).isoformat()
+    assert service.assignment(UUID(int=702)) is None
+    assert service.release(work, run_id) is False
+    with pytest.raises(StateConflict, match="fresh official FPL"):
+        service.handoff(handoff, handoff.payload_digest)
 
 
 def test_task_handler_revalidates_early_delivery_and_has_no_x_surface():

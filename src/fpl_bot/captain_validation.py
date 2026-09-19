@@ -22,6 +22,7 @@ from fpl_bot.captain_state import (
     PostingRecord,
     PostingStatus,
     PostKey,
+    RehearsalBinding,
     StateConflict,
     ValidatedCandidateRecord,
     candidate_content_digest,
@@ -76,6 +77,7 @@ class CandidateStateReader(Protocol):
     def current(self, key: PostKey) -> Generation | None: ...
     def generation_acquisition(self, generation_id: UUID) -> AcquisitionAttempt | None: ...
     def posting(self, key: PostKey) -> PostingRecord: ...
+    def rehearsal(self, generation_id: UUID) -> RehearsalBinding | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +93,7 @@ class ValidatedCaptainCandidate:
     assignment: CaptainAssignment
     attempt_id: UUID
     accepted_handoff_digest: str
+    official_deadline_utc: datetime
     top_three: tuple[ValidatedSelection, ValidatedSelection, ValidatedSelection]
     differential: ValidatedSelection
     official_event_fixtures: tuple[Fixture, ...]
@@ -184,6 +187,12 @@ class CaptainCandidateValidator:
         self, key: PostKey, handoff: ProjectionHandoff, *, allowed_claim_id: UUID | None = None
     ) -> ValidatedCaptainCandidate:
         now = self._state(key, handoff, allowed_claim_id)
+        rehearsal = self.repository.rehearsal(handoff.assignment.generation_id)
+        expected_deadline = (
+            rehearsal.official_deadline_utc
+            if rehearsal is not None
+            else handoff.assignment.timing.deadline_utc
+        )
         try:
             bootstrap = self.source.fetch_bootstrap_static()
             event = select_next_event(parse_events(bootstrap["events"]), now=now)
@@ -195,7 +204,7 @@ class CaptainCandidateValidator:
             raise CandidateRejected(ValidationStatus.FPL_UNAVAILABLE) from None
         if event.event_id != key.event_id:
             raise CandidateRejected(ValidationStatus.EVENT_CHANGED)
-        if event.deadline_utc != handoff.assignment.timing.deadline_utc:
+        if event.deadline_utc != expected_deadline:
             raise CandidateRejected(ValidationStatus.DEADLINE_CHANGED)
         try:
             payload = self.source.fetch_event_fixtures(event.event_id)
@@ -283,6 +292,7 @@ class CaptainCandidateValidator:
             handoff.assignment,
             handoff.attempt_id,
             handoff.payload_digest,
+            event.deadline_utc,
             tuple(evidence(s) for s in report.top_three),
             evidence(report.differential),
             fixtures,
@@ -315,7 +325,7 @@ def candidate_record(candidate: ValidatedCaptainCandidate) -> ValidatedCandidate
         candidate.attempt_id,
         candidate.accepted_handoff_digest,
         candidate.assignment.event_code,
-        candidate.assignment.timing.deadline_utc,
+        candidate.official_deadline_utc,
         top_three,
         differential,
         candidate.tweet,

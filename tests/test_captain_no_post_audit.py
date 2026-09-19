@@ -16,6 +16,9 @@ def test_audit_preserves_exact_utf8_candidate_evidence_without_posting_authority
     assert json.loads(saved.decode("utf-8"))["tweet"] == candidate.tweet
     assert "João" in saved.decode("utf-8")
     assert audit["postable"] is False
+    assert audit["schema_version"] == 2
+    assert audit["purpose"] == "non_postable_rehearsal"
+    assert audit["official_deadline_utc"] == candidate.official_deadline_utc.isoformat()
     assert audit["top_three"][0]["source_ordinal"] == 1
     assert audit["top_three"][0]["official_ownership"] == "10.0"
     assert audit["differential"]["official_ownership"] == "9.9"

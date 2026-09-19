@@ -31,4 +31,4 @@ if (@($jobs.name) -notcontains $name) {
 }
 Cloud @('scheduler','jobs','pause','captain-planner',"--project=$project","--location=$scheduleRegion",'--quiet')
 Cloud @('scheduler','jobs','update','http','captain-planner',"--project=$project","--location=$scheduleRegion",'--schedule=*/1 * * * *','--time-zone=Europe/London',"--uri=$origin/captain/control/tick","--oidc-service-account-email=captain-planner@$project.iam.gserviceaccount.com","--oidc-token-audience=$origin",'--quiet')
-Write-Output 'Captain controller deployed. Queue and planner remain PAUSED. No X publisher exists.'
+Write-Output 'Captain controller deployed. Queue and planner remain PAUSED. Publisher was not modified.'

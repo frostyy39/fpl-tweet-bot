@@ -16,7 +16,12 @@ from fpl_bot.captain_publisher import (
 )
 from fpl_bot.captain_publisher_http import PublisherAuthConfig, create_publisher_app
 from fpl_bot.captain_state import GenerationStatus as G
-from fpl_bot.captain_state import PostingStatus, StateConflict, candidate_content_digest
+from fpl_bot.captain_state import (
+    PostingStatus,
+    RehearsalBinding,
+    StateConflict,
+    candidate_content_digest,
+)
 from fpl_bot.captain_validation import candidate_record
 from fpl_bot.x_api import AuthenticatedXUser, CreatedXPost
 
@@ -72,6 +77,22 @@ def test_disabled_gate_precedes_state_oauth_and_x():
     instruction = PublicationInstruction(UUID(int=1), UUID(int=2), "a" * 64, "b" * 64, UUID(int=3))
     result = publisher.publish(instruction)
     assert result.status == PublishStatus.DISABLED
+
+
+def test_rehearsal_is_rejected_even_when_publisher_is_enabled():
+    publisher, instruction, repo, _, _, x, _ = prepared()
+    generation = repo.generation(instruction.generation_id)
+    repo._rehearsals[instruction.generation_id] = RehearsalBinding(
+        instruction.generation_id,
+        generation.key.event_id,
+        generation.assignment.timing.deadline_utc,
+        generation.assignment.timing.release_utc,
+        generation.assignment.timing.warmup_utc,
+    )
+    with pytest.raises(StateConflict, match="never publication authority"):
+        publisher.publish(instruction)
+    assert x.identity_calls == x.write_calls == 0
+    assert repo.posting(PUBLISH_KEY).attempts == ()
 
 
 def test_exact_fplbottest_success_revalidates_and_commits_write_barrier():

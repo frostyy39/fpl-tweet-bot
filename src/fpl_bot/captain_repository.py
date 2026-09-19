@@ -14,6 +14,7 @@ from fpl_bot.captain_state import (
     PostingRecord,
     PostingStatus,
     PostKey,
+    RehearsalBinding,
     SessionHealthEvidence,
     TaskIntent,
     TaskKind,
@@ -40,7 +41,19 @@ class CaptainGenerationRepository(Protocol):
         """CAS current generation; atomically cancel old work and create three task intents."""
         ...
 
+    def plan_rehearsal(
+        self,
+        key: PostKey,
+        assignment: CaptainAssignment,
+        binding: RehearsalBinding,
+        expected_current: UUID | None,
+        now: datetime,
+    ) -> Mutation[Generation]:
+        """Atomically create one generation and its permanent non-postable binding."""
+        ...
+
     def generation(self, generation_id: UUID) -> Generation: ...
+    def rehearsal(self, generation_id: UUID) -> RehearsalBinding | None: ...
     def current(self, key: PostKey) -> Generation | None: ...
     def transition(
         self,

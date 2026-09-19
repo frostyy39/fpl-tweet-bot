@@ -27,7 +27,13 @@ from fpl_bot.captain_orchestration_timing import CaptainTiming
 from fpl_bot.captain_serialization import InvalidCaptainDocument, from_document, to_document
 from fpl_bot.captain_state import GenerationStatus as G
 from fpl_bot.captain_state import PostingStatus as P
-from fpl_bot.captain_state import PostKey, SessionHealthEvidence, StateConflict, TaskKind
+from fpl_bot.captain_state import (
+    PostKey,
+    RehearsalBinding,
+    SessionHealthEvidence,
+    StateConflict,
+    TaskKind,
+)
 from fpl_bot.captain_vm_operations import DispatchStatus, VmAction
 
 T = datetime(2026, 9, 18, 15, 30, 0, 123456, tzinfo=UTC)
@@ -227,6 +233,23 @@ def test_roundtrip_all_durable_records():
     assert handoff.records[0].projected_points.as_tuple() == Decimal("7.3500").as_tuple()
     assert handoff.acquisition_started_utc == T
     assert from_document(to_document(handoff)).payload_digest == handoff.payload_digest
+
+
+def test_rehearsal_binding_roundtrip_and_firestore_restart():
+    repo, _, client = adapters()
+    key = PostKey("1", 5)
+    binding = RehearsalBinding(
+        ASSIGNMENT.generation_id,
+        5,
+        D := ASSIGNMENT.timing.deadline_utc + timedelta(days=7),
+        ASSIGNMENT.timing.release_utc,
+        ASSIGNMENT.timing.warmup_utc,
+    )
+    repo.plan_rehearsal(key, ASSIGNMENT, binding, None, binding.created_at_utc)
+    restarted, _, _ = adapters(client)
+    assert restarted.rehearsal(ASSIGNMENT.generation_id) == binding
+    assert restarted.rehearsal(ASSIGNMENT.generation_id).official_deadline_utc == D
+    assert from_document(to_document(binding)) == binding
 
 
 @pytest.mark.parametrize(

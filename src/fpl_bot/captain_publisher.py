@@ -140,6 +140,8 @@ class CaptainPublisher:
             return PublishResult(PublishStatus.DISABLED)
 
         generation = self.repository.generation(instruction.generation_id)
+        if self.repository.rehearsal(instruction.generation_id) is not None:
+            raise StateConflict("non-postable rehearsal is never publication authority")
         key = PostKey(FPLBOTTEST_USER_ID, generation.key.event_id)
         if generation.key != key:
             raise StateConflict("Captain destination is not FPLBotTest")
