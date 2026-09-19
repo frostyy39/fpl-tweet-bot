@@ -329,6 +329,26 @@ def test_duplicate_release_preserves_one_atomic_attempt():
     assert repo.generation_acquisition(work.assignment.generation_id).attempt_id == work.attempt_id
 
 
+def test_release_at_target_waits_for_durable_release_task_without_claiming():
+    controller, service, _, _, generation, clock = setup()
+    clock.value = generation.assignment.timing.target_utc
+    repo = controller.repository
+    gid = generation.assignment.generation_id
+    repo.transition(gid, GenerationStatus.WARMING, GenerationStatus.READY, clock.value)
+    work = WorkerAssignment(1, generation.assignment, UUID(int=99))
+    original = repo.claim_acquisition
+    repo.claim_acquisition = lambda *args: (_ for _ in ()).throw(
+        AssertionError("claim called before durable release")
+    )
+
+    assert service.release(work, work.attempt_id) is None
+    assert repo.generation_acquisition(gid) is None
+
+    repo.claim_acquisition = original
+    repo.transition(gid, GenerationStatus.READY, GenerationStatus.RELEASED, clock.value)
+    assert isinstance(service.release(work, work.attempt_id), ReleaseGrant)
+
+
 @pytest.mark.parametrize("during_claim", [False, True])
 def test_generation_supersession_fences_release_including_validation_claim_race(during_claim):
     service, repo, clock, work = release_setup()

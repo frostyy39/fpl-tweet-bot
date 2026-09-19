@@ -150,6 +150,12 @@ class WorkerControllerService:
                 work.assignment.generation_id, work.attempt_id, now
             ).record
             return ReleaseGrant(work, run_id, attempt.claimed_at)
+        if generation.status in {GenerationStatus.WARMING, GenerationStatus.READY}:
+            # The worker and release task may arrive on opposite sides of the
+            # same target-time boundary.  A current, in-window generation that
+            # has not yet observed its durable RELEASED transition is pending,
+            # not stale.  The atomic claim remains impossible until RELEASED.
+            return None
         return False
 
     def handoff(self, handoff: ProjectionHandoff, digest: str, health=None):
