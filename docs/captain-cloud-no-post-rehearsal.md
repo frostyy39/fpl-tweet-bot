@@ -365,6 +365,51 @@ planning another generation. The temporary reconciler is removed and the queue p
 authoritative Compute termination. It never turns a rehearsal candidate into a publication
 instruction.
 
+## Full cloud/Windows rehearsal attempts: 19 September
+
+The first live rehearsal exposed a release-boundary race without opening the browser. The worker's
+poll at `2026-09-19T18:50:26.519Z` was classified stale immediately before the durable release
+handler completed. Generation `d698cdf5-7136-56ab-864d-003aa69c21e2` therefore failed closed with
+no acquisition claim, handoff, candidate or posting attempt. Compute independently confirmed
+termination at `18:55:53.285Z`.
+
+Checkpoint `b63809fdb5669fa90459689a4e2a42444acfa2db` corrects only that classification: a fresh,
+current, in-window `WARMING` or `READY` generation remains pending until the release task's durable
+`RELEASED` transition is visible. The atomic acquisition claim is still impossible before that
+transition. The correction passed 18 focused controller tests, 674 Captain tests and the complete
+1,479-test suite, plus Ruff lint/format, dependency-integrity and diff checks. Controller revision
+`captain-controller-00003-cwp` serves the commit-tagged image digest
+`sha256:c135e468764ca694479c5eec8d61039bfb0afcf1b4bc7e8212d8cdd52044ab09`.
+
+The second immutable rehearsal used generation `bf8f1dc6-1986-596a-bda2-677f8df33583`, assignment
+`6db3b19f-721b-577a-9ccd-a0db077b87b8`, attempt
+`2e64a2c9-2cca-4c13-b2f6-71d5fcf9cdd0`, Event 6 / `GW6`, and the fresh official deadline
+`2026-10-10T11:00:00+01:00`. Its synthetic non-postable release was
+`2026-09-19T19:25:12Z`; the official deadline remained separately bound and authoritative.
+
+Cloud Tasks delivered warmup, and the durable START used lease
+`b8de7033-b661-5200-9f1d-0764a2b75f0a`, reservation
+`8078ccfd-7824-5cc1-bad4-421fe24ca747`, stable Compute request ID
+`a7ba3b36-0ac0-59d0-9324-1473e47688a5`, and provider operation
+`operation-1789845216356-65bdad052e759-4867ec21-61fb19a0`. The unattended Windows worker obtained
+its assignment at `19:15:38.670Z`; all pre-release polls returned 202. The release task committed at
+`19:25:12.454Z`, and the worker received its valid grant at `19:25:16.456Z`.
+
+The worker then reported `acquisition_failed` at `19:25:16.974Z`, before a handoff or session-health
+observation existed. The current deliberately redacted Windows audit does not retain the underlying
+safe browser error category, so authentication health, row counts and Captain selections cannot be
+claimed. No candidate or `captain_no_post_audits` record was produced. This is the remaining
+Windows-local diagnostic blocker; no blind retry was attempted.
+
+Cleanup used STOP reservation `88b3c6a9-790c-5d6f-8de5-4c9479a6ad3f`, stable request ID
+`9ca33df9-87eb-56b5-9842-93f7dec8801e`, and provider operation
+`operation-1789845927954-65bdafabd067b-891d2067-cb9b865e`. Compute reported TERMINATED at
+`19:25:47.952Z`; the durable VM lease and operations then cleared. Both rehearsal posting records
+contain zero attempts. The publisher remained revision `captain-publisher-00001-tkl` with
+`X_POSTING_ENABLED=false`, received no POST request, and was never given a rehearsal candidate.
+The recurring Captain planner and queue were returned to PAUSED, temporary tasks/jobs were removed,
+and Good Luck remained revision `fpl-bot-00007-c4n` and healthy.
+
 Validation for this checkpoint: nine offline Windows helper tests, 46 focused
 runtime/HTTP/adapter/helper tests, 629 Captain tests and 1,338 full-suite tests
 passed. Ruff lint, formatting, dependency integrity and diff checks passed.

@@ -13,7 +13,7 @@ spec:
           maxRetries: 0
           timeoutSeconds: '90'
           containers:
-            - image: europe-west2-docker.pkg.dev/fpl-frosty-bot-v1/captain-images/controller:039409e6aec45714ef07077ac11c3f86923bde6a
+            - image: europe-west2-docker.pkg.dev/fpl-frosty-bot-v1/captain-images/controller:b63809fdb5669fa90459689a4e2a42444acfa2db
               resources:
                 limits:
                   cpu: '1'
