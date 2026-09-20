@@ -48,11 +48,11 @@ function Get-TreeHashes($Directory) {
     return $result
 }
 
-function Assert-SameHashes($Expected, $Actual) {
-    if ($Expected.Count -ne $Actual.Count) { throw 'Audit preservation count mismatch' }
+function Assert-SameHashes($Expected, $Actual, $Description = 'Audit preservation') {
+    if ($Expected.Count -ne $Actual.Count) { throw "$Description count mismatch" }
     foreach ($name in $Expected.Keys) {
         if (-not $Actual.ContainsKey($name) -or $Actual[$name] -ne $Expected[$name]) {
-            throw 'Audit preservation hash mismatch'
+            throw "$Description hash mismatch"
         }
     }
 }
@@ -74,6 +74,7 @@ $parent = Join-Path $env:LOCALAPPDATA 'FPLBot'
 $root = Join-Path $parent 'CaptainCloudWorker01'
 $staging = Join-Path $parent ("CaptainCloudWorker01.staging-$ExpectedCommit")
 $rollback = Join-Path $parent 'CaptainCloudWorker01.rollback'
+$legacyRollbackArchive = Join-Path $parent 'CaptainCloudWorker01.rollback-legacy-unversioned'
 $profile = Join-Path $parent 'FPLReviewCaptainProfile'
 $python = Join-Path $parent 'CaptainControlledTrial01\venv\Scripts\python.exe'
 $taskName = 'Captain-Worker-NoPost'
@@ -88,9 +89,12 @@ foreach ($path in @($root, $profile)) {
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
     throw 'Existing proven Python runtime missing; no replacement performed'
 }
-if ((Test-Path -LiteralPath $staging) -or
-    (Test-Path -LiteralPath $rollback)) {
-    throw 'Staging or rollback target already exists; inspect it before retrying'
+if (Test-Path -LiteralPath $staging) {
+    throw 'Staging target already exists; inspect it before retrying'
+}
+if ((Test-Path -LiteralPath $rollback) -and
+    (Test-Path -LiteralPath $legacyRollbackArchive)) {
+    throw 'Both rollback generations exist; inspect them before retrying'
 }
 if (@(Get-Process chrome -ErrorAction SilentlyContinue).Count -ne 0) {
     throw 'Chrome is running; close it normally before replacement'
@@ -153,6 +157,55 @@ try {
     }
 } finally {
     $archive.Dispose()
+}
+
+$legacyRollbackPreserved = $false
+$legacyRollbackPath = $null
+if (Test-Path -LiteralPath $rollback) {
+    if (-not (Test-Path -LiteralPath $rollback -PathType Container) -or
+        ((Get-Item -LiteralPath $rollback -Force).Attributes -band
+            [IO.FileAttributes]::ReparsePoint)) {
+        throw 'Existing rollback is not a private directory; no replacement performed'
+    }
+    if (Test-Path -LiteralPath (Join-Path $rollback 'worker-build.json')) {
+        throw 'Existing rollback is versioned; inspect it before replacement'
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $rollback 'fpl_bot\captain_worker_cli.py') `
+            -PathType Leaf)) {
+        throw 'Existing legacy rollback structure is incomplete; no replacement performed'
+    }
+    Read-WorkerConfig (Join-Path $rollback 'worker-config.json') $root $profile | Out-Null
+    $rollbackAcl = Get-Acl -LiteralPath $rollback
+    if (-not $rollbackAcl.AreAccessRulesProtected -or
+        $rollbackAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value `
+            -ne $identity.User.Value) {
+        throw 'Existing legacy rollback ownership/ACL mismatch; no replacement performed'
+    }
+    $legacyHashes = Get-TreeHashes $rollback
+    Rename-Item -LiteralPath $rollback -NewName (Split-Path $legacyRollbackArchive -Leaf)
+    Assert-SameHashes $legacyHashes (Get-TreeHashes $legacyRollbackArchive) `
+        'Legacy rollback preservation'
+    $legacyRollbackPreserved = $true
+    $legacyRollbackPath = $legacyRollbackArchive
+} elseif (Test-Path -LiteralPath $legacyRollbackArchive) {
+    if (-not (Test-Path -LiteralPath $legacyRollbackArchive -PathType Container) -or
+        ((Get-Item -LiteralPath $legacyRollbackArchive -Force).Attributes -band
+            [IO.FileAttributes]::ReparsePoint) -or
+        (Test-Path -LiteralPath (Join-Path $legacyRollbackArchive 'worker-build.json')) -or
+        -not (Test-Path -LiteralPath `
+            (Join-Path $legacyRollbackArchive 'fpl_bot\captain_worker_cli.py') -PathType Leaf)) {
+        throw 'Prepared legacy rollback archive is invalid; no replacement performed'
+    }
+    Read-WorkerConfig (Join-Path $legacyRollbackArchive 'worker-config.json') `
+        $root $profile | Out-Null
+    $legacyArchiveAcl = Get-Acl -LiteralPath $legacyRollbackArchive
+    if (-not $legacyArchiveAcl.AreAccessRulesProtected -or
+        $legacyArchiveAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value `
+            -ne $identity.User.Value) {
+        throw 'Prepared legacy rollback archive ownership/ACL mismatch; no replacement performed'
+    }
+    $legacyRollbackPreserved = $true
+    $legacyRollbackPath = $legacyRollbackArchive
 }
 
 New-Item -ItemType Directory -Path $staging | Out-Null
@@ -248,6 +301,8 @@ try {
     preserved_config_sha256 = $configHash
     preserved_audit_files = $auditHashes.Count
     rollback_retained = $true
+    legacy_rollback_preserved = $legacyRollbackPreserved
+    legacy_rollback_path = $legacyRollbackPath
     task_temporarily_disabled = $false
     task_enabled = $true
     task_trigger = 'boot_delay_30_seconds'

@@ -59,11 +59,17 @@ def test_replacement_preserves_identity_task_config_audits_and_rollback():
         assert forbidden not in source
 
 
-def test_replacement_checks_staging_and_rollback_as_separate_paths():
+def test_replacement_checks_staging_and_preserves_legacy_rollback_without_overwrite():
     source = SCRIPT.read_text(encoding="utf-8")
     assert "Test-Path -LiteralPath $staging -or Test-Path -LiteralPath $rollback" not in source
-    assert "(Test-Path -LiteralPath $staging) -or" in source
-    assert "(Test-Path -LiteralPath $rollback)" in source
+    assert "if (Test-Path -LiteralPath $staging)" in source
+    assert "CaptainCloudWorker01.rollback-legacy-unversioned" in source
+    assert "Both rollback generations exist; inspect them before retrying" in source
+    assert "Existing rollback is versioned; inspect it before replacement" in source
+    assert "Legacy rollback preservation" in source
+    assert "Rename-Item -LiteralPath $rollback" in source
+    assert "legacy_rollback_preserved = $legacyRollbackPreserved" in source
+    assert "legacy_rollback_path = $legacyRollbackPath" in source
 
 
 def test_replacement_never_moves_copies_or_removes_browser_profile():
