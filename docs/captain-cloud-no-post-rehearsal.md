@@ -495,3 +495,123 @@ Earlier infrastructure-checkpoint validation: nine offline Windows helper tests,
 runtime/HTTP/adapter/helper tests, 629 Captain tests and 1,338 full-suite tests
 passed. Ruff lint, formatting, dependency integrity and diff checks passed.
 The normal tests use fake CLI/browser/transport inputs and no live Google calls.
+
+## Corrected-worker installation and completed rehearsal: 20 September
+
+The first diagnostic-worker run used build
+`e27331ef7cda4dbf1a3d8747deb09dfade8bfc49`. It failed in two milliseconds at
+`profile_validation` with `profile_missing_or_inaccessible`, despite the dedicated profile existing,
+no Chrome process or lock marker being present, and no browser process or navigation having begun.
+The profile was not changed. The failure exposed a repository-boundary defect rather than an FPL
+Review authentication problem: the flattened worker install made
+`Path(__file__).resolve().parents[2]` resolve to the common
+`C:\Users\captaintrial\AppData\Local\FPLBot` directory, falsely treating the sibling
+`FPLReviewCaptainProfile` as if it were inside a source repository.
+
+Checkpoint `55b5e6aef912b23a0c22e62f595560e2c4d45243` replaces that positional-parent
+inference. A source repository is now recognized only by explicit repository markers (`.git` and
+`pyproject.toml`), while the installed worker application directory is fenced independently. The
+dedicated-profile and provenance-marker requirements remain unchanged. Tests cover source-checkout
+profiles inside and outside the repository, the flattened sibling-profile layout, profiles inside
+the installed application directory, provenance validation order, unchanged lock checks and the
+absence of browser launch after a genuine path failure.
+
+The corrected immutable worker was built from
+`3a71ad6e78f8f54789b51be8bdbaef1b2b0222cc`. Its reviewed ZIP SHA256 was
+`A17609FA7EAED36BE29BF2CF81D373253CCA52D218478CE3CFE9CC2C8B90096F`; the
+reviewed replacement script SHA256 was
+`EA752E07F80A7A6EF8B8F29862DF6BBDAD16CB8E1B873D762B6831D0BA23BF19`.
+The worker-only closure contained 19 modules and no publisher/X module, credential or profile data.
+Checkpoint `3a71ad6e78f8f54789b51be8bdbaef1b2b0222cc` also makes an occupied legacy
+rollback slot fail-safe: the hash-verified legacy rollback is preserved under its own immutable
+name before the fixed rollback slot is used. No rollback state is deleted or overwritten.
+
+The same-user `captaintrial` replacement reported `replacement_verified`, previous build
+`e27331ef7cda4dbf1a3d8747deb09dfade8bfc49`, installed build `3a71ad6...`, both the
+immediate and legacy rollback copies retained, and the browser profile unmodified. The private
+configuration and nine audit files were preserved. The existing password-backed Task remained
+enabled with its 30-second boot delay; it was not re-registered and did not require temporary
+disablement. After verification, the operator signed out, closed RDP and terminated the
+user-managed IAP tunnel. The rehearsal then used a separate cold boot with no RDP connection.
+
+### Successful immutable non-postable rehearsal
+
+Rehearsal `c1a6aa7e-b7dd-47e7-a024-a090a4126e1c` created fresh generation
+`647883ac-ab89-5c49-9ed1-6c70e7ec40d1`, assignment
+`aacebf83-8048-52df-8cc6-9c3a17ba40b5` and acquisition attempt
+`764a44ad-0aa1-4e7c-aa56-dbcea3a91339`. Fresh official FPL data identified Event 6 / `GW6`
+with deadline `2026-10-10T10:00:00Z`. That official deadline remained authoritative and separate
+from the bounded synthetic execution window. The immutable purpose was
+`non_postable_rehearsal`, and the destination was the independent diagnostic ID `1`.
+
+The explicit warmup task delivered at `2026-09-20T16:31:02Z`. Durable START used lease
+`6506830c-d2d8-5a6f-be6d-bf96143044cf`, reservation
+`722ad169-b953-559a-9a0d-229e38f80f39`, stable Compute request ID
+`ff3ebfda-6b1a-5897-a56d-9c722cfa9d97`, and provider operation
+`operation-1789921864485-65beca8e88964-7c70758c-85517d4b`. Compute confirmed RUNNING and
+the generation became READY at `16:33:10.153733Z`. The password-backed unattended worker obtained
+its assignment at `16:33:16.901993Z`; every pre-release poll returned HTTP 202.
+
+The release task committed the durable RELEASED transition at `16:46:02.566666Z`. The worker
+received HTTP 200 at `16:46:03.660660Z`, and the atomic acquisition claim was recorded at
+`16:46:03.543502Z`. Profile boundary and provenance validation therefore passed in the corrected
+build; Chrome resolution, persistent browser launch and navigation were reached. FPL Review was
+authenticated, and acquisition ran from `16:46:03.607006Z` through `16:46:44.637971Z`. The handoff
+contained 50 raw, 50 genuine and 50 extracted rows, preserved source ordinals and reported complete
+cleanup. Safe session evidence records `authenticated` at `16:46:43.712663Z`; real cookie expiry
+and refresh remain unknown, and no cookie values were read or persisted.
+
+The authenticated worker handoff returned HTTP 200 at `16:46:48.093987Z`. Fresh cloud validation
+then accepted the immutable handoff digest
+`89c9ea434fcf188a5849e7410e29982bbc9c51518384597ead66e1a120616f53` and persisted candidate
+digest `e3083e1c3e50331750c0169a854bf4d6f225a61893b9b7f648c434feca95d438` at
+`16:46:49.131951Z`. The official selection was:
+
+- B.Fernandes, 6.64, TOT (H), fresh ownership 39.6%;
+- Saka, 6.32, LEE (H), fresh ownership 13.3%;
+- Palmer, 6.30, BOU (H), fresh ownership 26.7%;
+- Differential Havertz, 5.07, LEE (H), fresh ownership 8.5%.
+
+The canonical 204-weighted-character non-postable candidate was:
+
+```text
+🧢 CAPTAIN PICKS 🧢
+
+#GW6 Projected Points:
+
+🥇 B.Fernandes v TOT (H) - 6.64
+🥈 Saka v LEE (H) - 6.32
+🥉 Palmer v BOU (H) - 6.30
+
+Differential:
+
+🐴 Havertz v LEE (H) - 5.07
+
+Good luck!
+
+#FPL #FPLCommunity
+```
+
+The candidate is permanently marked `postable=false` through the rehearsal binding and diagnostic
+destination. Its event-level posting record has zero attempts; there is no claim, `write_started`
+or X Post ID. The publisher remained revision `captain-publisher-00001-tkl` with
+`X_POSTING_ENABLED=false` and received zero requests during the rehearsal. The controller/worker
+path has no X or shared-OAuth dependency, so the shared OAuth authority was not accessed or
+refreshed.
+
+Cleanup reserved exactly one STOP using reservation
+`0aa90b66-9344-581d-a635-949b3b3e9363`, stable request ID
+`58e1f4c2-e76f-51d9-85ab-2df48e736917`, and provider operation
+`operation-1789922806791-65bece112fc2b-9b680be0-44315ec6`. Acknowledgement left the VM-use lease
+in `stopping`; it did not release ownership. Compute independently recorded TERMINATED at
+`2026-09-20T16:47:13.587Z`, after which reconciliation removed the VM-use lease and terminalised the
+operation. The queue is PAUSED and empty, the planner is PAUSED, and the temporary rehearsal job is
+deleted. The four-hour Compute STOP safeguard remains configured. Good Luck remains healthy at
+revision `fpl-bot-00007-c4n` and was not changed.
+
+This completes the previously outstanding non-postable chain: authenticated Cloud Tasks,
+crash-safe Compute START, cold password-backed Windows execution without RDP, metadata-authenticated
+assignment/release, real FPL Review acquisition, immutable handoff, fresh official-FPL candidate
+validation, fenced STOP and independently confirmed termination. It does not prove an X write. The
+next step, under a separate review, is a controlled FPLBotTest-only publisher proof with the existing
+fresh validation, event-level idempotency, shared-OAuth and uncertainty safeguards.
