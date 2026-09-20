@@ -109,6 +109,7 @@ def test_rehearsal_scripts_parse_in_windows_powershell():
         ROOT / "deploy/observe-captain-worker-boot.ps1",
         ROOT / "deploy/install-captain-boot-observer.ps1",
         ROOT / "deploy/probe-captain-early-task.ps1",
+        ROOT / "deploy/replace-captain-worker-remote.ps1",
     ]
     script = "$failed = $false\n"
     for path in paths:

@@ -449,6 +449,44 @@ registration must change, the existing password must again be supplied only in T
 native credential dialog. This maintenance step, followed by one cold boot with no RDP, is the next
 safe diagnostic task; it is not performed by this checkpoint.
 
+### Reviewed same-user diagnostic worker replacement
+
+The exact diagnostic bundle built from `e27331ef7cda4dbf1a3d8747deb09dfade8bfc49` is
+`worker-e27331ef7cda4dbf1a3d8747deb09dfade8bfc49.zip`, with SHA256
+`437AF8CA4AD9E3EE8272BEEFAA2A82A28AC3D3D08CE092AE2EA271BF1EC53AF0`. Its manifest is exactly
+schema 1 plus that commit. Its import closure contains only the worker, browser, transport and pure
+Captain domain modules; it contains no publisher/X module, credentials, browser profile or secret
+material.
+
+The installed layout has three separate lifetimes:
+
+- `CaptainCloudWorker01/fpl_bot`, the preparation helper and `worker-build.json` are replaceable
+  application files;
+- `CaptainCloudWorker01/worker-config.json`, `audits/` and the retained Task XML are private
+  persistent worker state;
+- `CaptainControlledTrial01/venv`, the registered Task and `FPLReviewCaptainProfile` are external to
+  the application directory and are never moved by a package replacement.
+
+`replace-captain-worker-remote.ps1` (SHA256
+`ABF9DE60B33D7D6F1F8D6746ACA9B4A1EF434B6878335D45D05AFE6A881CCA8D`) performs the reviewed
+replacement under the existing
+`captaintrial` identity. It requires the expected ZIP hash and commit, validates the exact worker-only
+archive closure, the current task contract, private config, owner/ACL, zero worker/Chrome processes
+and absence of lifecycle markers. It stages under a private sibling directory, copies the existing
+config byte-for-byte and audit tree hash-for-hash, optionally preserves the Task XML, then renames the
+old root to the single `CaptainCloudWorker01.rollback` directory and the staged root into place. If
+the second rename or installed validation fails, it restores the old root; it never deletes either
+copy. It verifies the installed manifest, imports the worker without running it, checks dependencies,
+and rechecks the unchanged Task.
+
+The Task does not need temporary disablement during this maintenance procedure. It has one boot
+trigger, demand start is disabled, and the replacement refuses to proceed until the startup instance
+has completed and the Task is `Ready`. The queue and planner must remain paused, so the legacy worker
+can only take its already-proven no-assignment exit during the maintenance boot. The script never
+edits/re-registers the password-backed Task and therefore does not request or handle the password.
+It also never copies, moves, hashes or opens browser-profile contents. After verification, the Task
+remains enabled with its original password-backed principal, boot trigger and fixed application path.
+
 Diagnostic-checkpoint validation: 84 worker/observer-focused tests, 693 Captain tests and the full
 1,501-test suite passed. Ruff lint and format checks, dependency integrity, static worker import
 closure and Git diff checks also passed.
