@@ -157,7 +157,7 @@ def test_verifier_requires_posting_disabled() -> None:
 
 def test_verifier_rejects_unsupported_environment() -> None:
     environ = valid_environment()
-    environ["X_ENVIRONMENT"] = "production"
+    environ["X_ENVIRONMENT"] = "staging"
 
     with pytest.raises(XConfigurationError, match="X_ENVIRONMENT"):
         create_cloud_oauth_identity_verifier(environ, x_token_store=object())

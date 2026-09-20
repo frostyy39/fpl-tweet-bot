@@ -29,6 +29,7 @@ dev = [
 [project.scripts]
 fpl-bot = "fpl_bot.cli:main"
 fpl-bot-x-authorize = "fpl_bot.x_oauth_cli:main"
+fpl-bot-x-authorize-production = "fpl_bot.x_production_authorization_cli:main"
 fpl-bot-x-test-post = "fpl_bot.test_post:main"
 fpl-bot-x-bootstrap = "fpl_bot.x_token_bootstrap_cli:main"
 fpl-bot-x-reseed = "fpl_bot.x_token_reseed_cli:main"

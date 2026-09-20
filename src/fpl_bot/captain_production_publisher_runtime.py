@@ -1,39 +1,26 @@
-"""Production composition for the separate, FPLBotTest-only Captain publisher."""
+"""Production-account composition for the separate, disabled Captain publisher."""
 
 import os
 from dataclasses import dataclass
-from datetime import UTC, datetime
 
 from fpl_bot.api import FplApiClient
 from fpl_bot.captain_firestore import FirestoreCaptainRepository
 from fpl_bot.captain_http import GoogleOidcAuthorizer, default_google_token_verifier
-from fpl_bot.captain_publisher import FPLBOTTEST_USER_ID, CaptainPublisher
-from fpl_bot.captain_publisher_http import PublisherAuthConfig, create_publisher_app
-from fpl_bot.captain_validation import CaptainCandidateValidator
+from fpl_bot.captain_publisher_runtime import UtcClock, _boolean, compose
 from fpl_bot.cloud_token_store import CloudXTokenStateStoreConfig, GoogleCloudXTokenStateStore
+from fpl_bot.production_x_identity import PRODUCTION_X_USER_ID
 from fpl_bot.runtime_config import ProductionConfigurationError, required_runtime_value
 from fpl_bot.x_api import XApiClient
-from fpl_bot.x_config import TEST_ENVIRONMENT, XPostingConfig
+from fpl_bot.x_config import PRODUCTION_ENVIRONMENT, X_ID_PATTERN, XPostingConfig
 from fpl_bot.x_oauth import OAuthClientCredentials
 from fpl_bot.x_token_refresh import RefreshingXAccessTokenProvider, XOAuthRefreshClient
 
-FPLBOTTEST_TOKEN_SECRET = "x-oauth-token-state"
-
-
-class UtcClock:
-    def now(self):
-        return datetime.now(UTC)
-
-
-def _boolean(source, name):
-    value = required_runtime_value(source, name).casefold()
-    if value not in {"true", "false"}:
-        raise ProductionConfigurationError(f"{name} must be true or false")
-    return value == "true"
+PRODUCTION_OAUTH_DATABASE = "production-shared-x-oauth"
+PRODUCTION_TOKEN_SECRET = "production-x-oauth-token-state"
 
 
 @dataclass(frozen=True, slots=True)
-class CaptainPublisherConfig:
+class ProductionCaptainPublisherConfig:
     project: str
     project_number: str
     captain_database: str
@@ -41,6 +28,7 @@ class CaptainPublisherConfig:
     origin: str
     invoker_email: str
     token_secret_id: str
+    destination_user_id: str
     oauth_credentials: OAuthClientCredentials
     posting_enabled: bool
 
@@ -48,27 +36,35 @@ class CaptainPublisherConfig:
         if (
             self.project != "fpl-frosty-bot-v1"
             or self.captain_database != "captain-state"
-            or self.oauth_database != "shared-x-oauth"
-            or self.origin != "https://captain-publisher-524790767721.europe-west1.run.app"
+            or self.oauth_database != PRODUCTION_OAUTH_DATABASE
+            or self.origin
+            != "https://captain-production-publisher-524790767721.europe-west1.run.app"
             or self.invoker_email
-            != f"captain-publisher-invoker@{self.project}.iam.gserviceaccount.com"
-            or self.token_secret_id != FPLBOTTEST_TOKEN_SECRET
+            != f"captain-prod-pub-invoker@{self.project}.iam.gserviceaccount.com"
+            or self.token_secret_id != PRODUCTION_TOKEN_SECRET
+            or not X_ID_PATTERN.fullmatch(self.destination_user_id)
             or not self.project_number.isdecimal()
             or self.project_number.startswith("0")
-            or not self.token_secret_id
             or type(self.posting_enabled) is not bool
         ):
-            raise ProductionConfigurationError("invalid isolated Captain publisher configuration")
+            raise ProductionConfigurationError(
+                "invalid isolated production Captain publisher configuration"
+            )
 
     @classmethod
-    def environment(cls, environ=None):
+    def environment(cls, environ=None, *, configured_user_id=PRODUCTION_X_USER_ID):
         source = os.environ if environ is None else environ
+        if configured_user_id is None or not X_ID_PATTERN.fullmatch(configured_user_id):
+            raise ProductionConfigurationError(
+                "production X identity has not been reviewed and configured"
+            )
         expected = required_runtime_value(source, "X_EXPECTED_USER_ID")
-        if expected != FPLBOTTEST_USER_ID:
-            raise ProductionConfigurationError("Captain publisher is hard-bound to FPLBotTest")
-        environment = required_runtime_value(source, "X_ENVIRONMENT")
-        if environment != TEST_ENVIRONMENT:
-            raise ProductionConfigurationError("Captain publisher has no production X mode")
+        if expected != configured_user_id:
+            raise ProductionConfigurationError(
+                "production Captain publisher identity differs from reviewed source identity"
+            )
+        if required_runtime_value(source, "X_ENVIRONMENT") != PRODUCTION_ENVIRONMENT:
+            raise ProductionConfigurationError("production Captain publisher has no test mode")
         return cls(
             required_runtime_value(source, "GCP_PROJECT_ID"),
             required_runtime_value(source, "GCP_PROJECT_NUMBER"),
@@ -77,6 +73,7 @@ class CaptainPublisherConfig:
             required_runtime_value(source, "CAPTAIN_PUBLISHER_ORIGIN"),
             required_runtime_value(source, "CAPTAIN_PUBLISHER_INVOKER_EMAIL"),
             required_runtime_value(source, "X_TOKEN_SECRET_ID"),
+            expected,
             OAuthClientCredentials(
                 required_runtime_value(source, "X_OAUTH_CLIENT_ID"),
                 required_runtime_value(source, "X_OAUTH_CLIENT_SECRET"),
@@ -85,51 +82,26 @@ class CaptainPublisherConfig:
         )
 
 
-def compose(
-    config,
-    repository,
-    source,
-    clock,
-    x_client,
-    authorizer,
-    *,
-    destination_user_id=FPLBOTTEST_USER_ID,
-):
-    publisher = CaptainPublisher(
-        repository,
-        CaptainCandidateValidator(repository, source, clock),
-        x_client,
-        x_client,
-        clock,
-        destination_user_id=destination_user_id,
-        posting_enabled=config.posting_enabled,
-    )
-    return create_publisher_app(
-        publisher,
-        authorizer,
-        PublisherAuthConfig(config.origin, config.invoker_email),
-    )
-
-
 def create_app():
     from google.cloud import firestore_v1, secretmanager
 
-    config = CaptainPublisherConfig.environment()
+    config = ProductionCaptainPublisherConfig.environment()
     repository = FirestoreCaptainRepository(
         project=config.project, database=config.captain_database
     )
-    oauth_firestore = firestore_v1.Client(project=config.project, database=config.oauth_database)
     token_store = GoogleCloudXTokenStateStore(
         CloudXTokenStateStoreConfig(
             project_id=config.project,
             project_number=config.project_number,
             secret_id=config.token_secret_id,
-            expected_user_id=FPLBOTTEST_USER_ID,
+            expected_user_id=config.destination_user_id,
         ),
-        firestore_client=oauth_firestore,
+        firestore_client=firestore_v1.Client(
+            project=config.project, database=config.oauth_database
+        ),
         secret_manager_client=secretmanager.SecretManagerServiceClient(),
     )
-    token_provider = RefreshingXAccessTokenProvider(
+    provider = RefreshingXAccessTokenProvider(
         token_store,
         XOAuthRefreshClient(),
         config.oauth_credentials,
@@ -137,11 +109,11 @@ def create_app():
     )
     x_client = XApiClient(
         XPostingConfig(
-            environment=TEST_ENVIRONMENT,
+            environment=PRODUCTION_ENVIRONMENT,
             posting_enabled=config.posting_enabled,
-            expected_user_id=FPLBOTTEST_USER_ID,
+            expected_user_id=config.destination_user_id,
         ),
-        token_provider=token_provider,
+        token_provider=provider,
     )
     return compose(
         config,
@@ -150,4 +122,5 @@ def create_app():
         UtcClock(),
         x_client,
         GoogleOidcAuthorizer(default_google_token_verifier),
+        destination_user_id=config.destination_user_id,
     )

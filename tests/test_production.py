@@ -410,12 +410,12 @@ def test_malformed_expected_x_user_id_fails_closed() -> None:
 
 
 @pytest.mark.parametrize("posting_enabled", ["true", "false"])
-def test_unsupported_x_environment_fails_closed(posting_enabled: str) -> None:
+def test_unknown_x_environment_fails_closed(posting_enabled: str) -> None:
     environ = valid_environment()
-    environ["X_ENVIRONMENT"] = "production"
+    environ["X_ENVIRONMENT"] = "staging"
     environ["X_POSTING_ENABLED"] = posting_enabled
 
-    with pytest.raises(XConfigurationError, match="no production mode"):
+    with pytest.raises(XConfigurationError, match="must be one of"):
         ProductionRuntimeConfig.from_environment(environ)
 
 

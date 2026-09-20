@@ -57,13 +57,13 @@ def authorize_from_local_credentials(
     *,
     client_id_path: Path,
     encrypted_client_secret_path: Path,
-    expected_user_id: str,
+    expected_user_id: str | None,
     token_output_path: Path,
     repository_root: Path,
     authorizer: Callable[..., AuthenticatedXUser] = authorize_test_account,
     browser_open: Callable[[str], bool] | None = None,
 ) -> ReauthorizationMetadata:
-    if not X_ID_PATTERN.fullmatch(expected_user_id):
+    if expected_user_id is not None and not X_ID_PATTERN.fullmatch(expected_user_id):
         raise XOAuthConfigurationError("Expected X user ID must be a positive numeric value")
     if token_output_path.exists() or token_output_path.is_symlink():
         raise XOAuthConfigurationError("The new token-output file already exists")

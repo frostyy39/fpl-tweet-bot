@@ -18,6 +18,7 @@ from fpl_bot.captain_publisher_http import PublisherAuthConfig, create_publisher
 from fpl_bot.captain_state import GenerationStatus as G
 from fpl_bot.captain_state import (
     PostingStatus,
+    PostKey,
     RehearsalBinding,
     StateConflict,
     candidate_content_digest,
@@ -26,6 +27,7 @@ from fpl_bot.captain_validation import candidate_record
 from fpl_bot.x_api import AuthenticatedXUser, CreatedXPost
 
 PUBLISH_KEY = replace(KEY, destination_user_id=FPLBOTTEST_USER_ID)
+PRODUCTION_USER_ID = "987654321012345678"
 
 
 class X:
@@ -44,20 +46,28 @@ class X:
         return CreatedXPost("123456789", text)
 
 
-def prepared(*, enabled=True, x=None):
+def prepared(*, enabled=True, x=None, destination_user_id=FPLBOTTEST_USER_ID):
     validator, repo, source, clock, handoff = build()
     # The production key is fixed; tests preserve the accepted assignment while
     # replacing only its event-level destination identity.
     generation = repo.generation(handoff.assignment.generation_id)
-    production_key = PUBLISH_KEY
+    production_key = replace(KEY, destination_user_id=destination_user_id)
     repo._generations[generation.assignment.generation_id] = replace(generation, key=production_key)
     del repo._current[KEY]
     repo._current[production_key] = generation.assignment.generation_id
     candidate = validator.validate(production_key, handoff)
     record = candidate_record(candidate)
     repo.accept_candidate(record, T)
-    x = x or X()
-    publisher = CaptainPublisher(repo, validator, x, x, clock, posting_enabled=enabled)
+    x = x or X(destination_user_id)
+    publisher = CaptainPublisher(
+        repo,
+        validator,
+        x,
+        x,
+        clock,
+        destination_user_id=destination_user_id,
+        posting_enabled=enabled,
+    )
     instruction = PublicationInstruction(
         handoff.assignment.generation_id,
         handoff.attempt_id,
@@ -73,7 +83,15 @@ def test_disabled_gate_precedes_state_oauth_and_x():
         def __getattr__(self, name):
             raise AssertionError(name)
 
-    publisher = CaptainPublisher(Never(), Never(), Never(), Never(), Never(), posting_enabled=False)
+    publisher = CaptainPublisher(
+        Never(),
+        Never(),
+        Never(),
+        Never(),
+        Never(),
+        destination_user_id=FPLBOTTEST_USER_ID,
+        posting_enabled=False,
+    )
     instruction = PublicationInstruction(UUID(int=1), UUID(int=2), "a" * 64, "b" * 64, UUID(int=3))
     result = publisher.publish(instruction)
     assert result.status == PublishStatus.DISABLED
@@ -116,6 +134,34 @@ def test_wrong_or_arbitrary_x_identity_never_writes(user):
     assert publisher.publish(instruction).status == PublishStatus.REJECTED
     assert x.write_calls == 0
     assert repo.posting(PUBLISH_KEY).attempts[-1].status == PostingStatus.FAILED_BEFORE_WRITE
+
+
+def test_test_and_production_destination_authorities_cannot_cross():
+    publisher, instruction, repo, _, clock, production_x, _ = prepared(
+        destination_user_id=PRODUCTION_USER_ID
+    )
+    generation = repo.generation(instruction.generation_id)
+    assert generation.key.destination_user_id == PRODUCTION_USER_ID
+
+    test_x = X(FPLBOTTEST_USER_ID)
+    test_publisher = CaptainPublisher(
+        repo,
+        publisher.validator,
+        test_x,
+        test_x,
+        clock,
+        destination_user_id=FPLBOTTEST_USER_ID,
+        posting_enabled=True,
+    )
+    with pytest.raises(StateConflict, match="does not match this publisher"):
+        test_publisher.publish(instruction)
+    assert test_x.identity_calls == test_x.write_calls == 0
+    assert production_x.identity_calls == production_x.write_calls == 0
+    assert repo.posting(generation.key).attempts == ()
+
+
+def test_event_level_idempotency_identity_remains_destination_specific():
+    assert PostKey(FPLBOTTEST_USER_ID, 6) != PostKey(PRODUCTION_USER_ID, 6)
 
 
 @pytest.mark.parametrize("field", ["candidate_digest", "handoff_digest", "attempt_id"])

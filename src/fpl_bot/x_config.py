@@ -13,6 +13,8 @@ X_EXPECTED_USER_ID_VARIABLE = "X_EXPECTED_USER_ID"
 X_USER_ACCESS_TOKEN_VARIABLE = "X_USER_ACCESS_TOKEN"
 
 TEST_ENVIRONMENT = "test"
+PRODUCTION_ENVIRONMENT = "production"
+SUPPORTED_ENVIRONMENTS = frozenset({TEST_ENVIRONMENT, PRODUCTION_ENVIRONMENT})
 X_ID_PATTERN = re.compile(r"[1-9][0-9]*\Z")
 
 
@@ -59,11 +61,10 @@ class XPostingConfig:
         return self.require_configured_identity()
 
     def require_configured_identity(self) -> str:
-        """Validate the configured test-account identity without enabling writes."""
-        if self.environment != TEST_ENVIRONMENT:
+        """Validate one explicitly selected account environment without enabling writes."""
+        if self.environment not in SUPPORTED_ENVIRONMENTS:
             raise XConfigurationError(
-                f"{X_ENVIRONMENT_VARIABLE} must be {TEST_ENVIRONMENT!r}; "
-                "Milestone 2A has no production mode"
+                f"{X_ENVIRONMENT_VARIABLE} must be one of {sorted(SUPPORTED_ENVIRONMENTS)!r}"
             )
         if self.expected_user_id is None:
             raise XConfigurationError(

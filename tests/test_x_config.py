@@ -1,6 +1,6 @@
 import pytest
 
-from fpl_bot.x_config import XPostingConfig
+from fpl_bot.x_config import PRODUCTION_ENVIRONMENT, XPostingConfig
 from fpl_bot.x_errors import XConfigurationError
 
 
@@ -42,7 +42,7 @@ def test_configured_identity_validation_allows_posting_to_remain_disabled() -> N
 @pytest.mark.parametrize(
     ("environment", "expected_user_id", "message"),
     [
-        ("production", "123456789", "no production mode"),
+        ("staging", "123456789", "must be one of"),
         ("test", None, "X_EXPECTED_USER_ID is required"),
         ("test", "not-numeric", "positive numeric"),
     ],
@@ -67,7 +67,7 @@ def test_invalid_posting_enabled_value_is_rejected() -> None:
         XPostingConfig.from_environment({"X_POSTING_ENABLED": "yes"})
 
 
-def test_production_mode_is_not_available() -> None:
+def test_production_mode_requires_the_same_explicit_write_guards() -> None:
     config = XPostingConfig(
         environment="production",
         posting_enabled=True,
@@ -75,8 +75,11 @@ def test_production_mode_is_not_available() -> None:
         user_access_token="unit-test-token-placeholder",
     )
 
-    with pytest.raises(XConfigurationError, match="no production mode"):
-        config.require_posting_guards()
+    assert config.environment == PRODUCTION_ENVIRONMENT
+    assert config.require_posting_guards() == (
+        "unit-test-token-placeholder",
+        "123456789",
+    )
 
 
 def test_access_token_is_redacted_from_configuration_representation() -> None:

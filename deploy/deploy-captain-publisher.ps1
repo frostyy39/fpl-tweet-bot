@@ -28,6 +28,9 @@ if ($Image -notmatch '^europe-west2-docker\.pkg\.dev/fpl-frosty-bot-v1/captain-i
 foreach ($value in @($TokenSecretId, $OAuthClientIdSecret, $OAuthClientSecretSecret)) {
     if ($value -notmatch '^[A-Za-z0-9_-]{1,255}$') { throw 'Invalid Secret Manager resource ID.' }
 }
+if ($TokenSecretId -ne 'x-oauth-token-state') {
+    throw 'FPLBotTest publisher must use only the test OAuth token authority secret.'
+}
 
 function Cloud {
     & gcloud.cmd @args

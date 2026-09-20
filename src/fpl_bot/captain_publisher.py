@@ -13,6 +13,7 @@ from fpl_bot.captain_validation import (
     candidate_record,
 )
 from fpl_bot.x_api import XIdentityReader, XPostCreator
+from fpl_bot.x_config import X_ID_PATTERN
 from fpl_bot.x_errors import XApiError, XIdentityMismatchError
 
 FPLBOTTEST_USER_ID = "1732468005336907776"
@@ -93,8 +94,13 @@ class CaptainPublisher:
         writer: XPostCreator,
         clock: PublisherClock,
         *,
+        destination_user_id: str,
         posting_enabled: bool,
     ) -> None:
+        if not isinstance(destination_user_id, str) or not X_ID_PATTERN.fullmatch(
+            destination_user_id
+        ):
+            raise ValueError("destination_user_id must be a positive numeric X user ID")
         if type(posting_enabled) is not bool:
             raise ValueError("posting_enabled must be boolean")
         self.repository = repository
@@ -102,6 +108,7 @@ class CaptainPublisher:
         self.identity = identity
         self.writer = writer
         self.clock = clock
+        self.destination_user_id = destination_user_id
         self.posting_enabled = posting_enabled
 
     def _now(self):
@@ -142,9 +149,9 @@ class CaptainPublisher:
         generation = self.repository.generation(instruction.generation_id)
         if self.repository.rehearsal(instruction.generation_id) is not None:
             raise StateConflict("non-postable rehearsal is never publication authority")
-        key = PostKey(FPLBOTTEST_USER_ID, generation.key.event_id)
+        key = PostKey(self.destination_user_id, generation.key.event_id)
         if generation.key != key:
-            raise StateConflict("Captain destination is not FPLBotTest")
+            raise StateConflict("Captain destination does not match this publisher")
         attempt = self.repository.generation_acquisition(instruction.generation_id)
         candidate = self.repository.candidate(instruction.generation_id)
         handoff = attempt.handoff if attempt is not None else None
@@ -171,7 +178,7 @@ class CaptainPublisher:
             fresh = self.validator.validate(key, handoff, allowed_claim_id=instruction.claim_id)
             self._match_fresh(candidate, fresh)
             authenticated = self.identity.get_authenticated_user()
-            if authenticated.user_id != FPLBOTTEST_USER_ID:
+            if authenticated.user_id != self.destination_user_id:
                 raise XIdentityMismatchError("Captain publisher X identity mismatch")
             write = self.repository.start_write(key, instruction.claim_id, self._now())
             if not write.applied:
@@ -217,7 +224,7 @@ class CaptainPublisher:
         """Promote only externally proven exact evidence; discovery is deliberately separate."""
 
         generation = self.repository.generation(instruction.generation_id)
-        key = PostKey(FPLBOTTEST_USER_ID, generation.key.event_id)
+        key = PostKey(self.destination_user_id, generation.key.event_id)
         result = self.repository.finish_post(
             key, instruction.claim_id, PostingStatus.SUCCEEDED, self._now(), post_id
         )

@@ -19,7 +19,7 @@ def environment():
         "CAPTAIN_PUBLISHER_INVOKER_EMAIL": (
             "captain-publisher-invoker@fpl-frosty-bot-v1.iam.gserviceaccount.com"
         ),
-        "X_TOKEN_SECRET_ID": "fpl-bot-x-token-state",
+        "X_TOKEN_SECRET_ID": "x-oauth-token-state",
         "X_OAUTH_CLIENT_ID": "synthetic-client-id",
         "X_OAUTH_CLIENT_SECRET": "synthetic-client-secret",
         "X_ENVIRONMENT": "test",
@@ -43,6 +43,7 @@ def test_disabled_test_only_database_configuration():
         ("X_OAUTH_FIRESTORE_DATABASE_ID", "(default)"),
         ("X_EXPECTED_USER_ID", "999"),
         ("X_ENVIRONMENT", "production"),
+        ("X_TOKEN_SECRET_ID", "production-x-oauth-token-state"),
         ("CAPTAIN_PUBLISHER_INVOKER_EMAIL", "captain-worker@example.com"),
     ],
 )
