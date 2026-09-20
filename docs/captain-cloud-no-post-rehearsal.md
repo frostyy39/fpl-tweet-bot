@@ -468,7 +468,7 @@ The installed layout has three separate lifetimes:
   the application directory and are never moved by a package replacement.
 
 `replace-captain-worker-remote.ps1` (SHA256
-`ABF9DE60B33D7D6F1F8D6746ACA9B4A1EF434B6878335D45D05AFE6A881CCA8D`) performs the reviewed
+`98FB0CB603FFEA74B6ABCF4F0AEA417D43A800E000535675AB9A5697AD0AA2CA`) performs the reviewed
 replacement under the existing
 `captaintrial` identity. It requires the expected ZIP hash and commit, validates the exact worker-only
 archive closure, the current task contract, private config, owner/ACL, zero worker/Chrome processes

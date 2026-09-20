@@ -88,7 +88,8 @@ foreach ($path in @($root, $profile)) {
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
     throw 'Existing proven Python runtime missing; no replacement performed'
 }
-if (Test-Path -LiteralPath $staging -or Test-Path -LiteralPath $rollback) {
+if ((Test-Path -LiteralPath $staging) -or
+    (Test-Path -LiteralPath $rollback)) {
     throw 'Staging or rollback target already exists; inspect it before retrying'
 }
 if (@(Get-Process chrome -ErrorAction SilentlyContinue).Count -ne 0) {

@@ -59,6 +59,13 @@ def test_replacement_preserves_identity_task_config_audits_and_rollback():
         assert forbidden not in source
 
 
+def test_replacement_checks_staging_and_rollback_as_separate_paths():
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "Test-Path -LiteralPath $staging -or Test-Path -LiteralPath $rollback" not in source
+    assert "(Test-Path -LiteralPath $staging) -or" in source
+    assert "(Test-Path -LiteralPath $rollback)" in source
+
+
 def test_replacement_never_moves_copies_or_removes_browser_profile():
     source = SCRIPT.read_text(encoding="utf-8")
     assert "$profile = Join-Path $parent 'FPLReviewCaptainProfile'" in source
