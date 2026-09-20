@@ -1117,6 +1117,100 @@ def test_repository_local_profile_is_rejected_even_if_name_is_ignored() -> None:
     assert raised.value.category == "dedicated_profile_required"
 
 
+def test_source_checkout_profile_inside_established_repository_is_rejected(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repository = tmp_path / "checkout"
+    (repository / ".git").mkdir(parents=True)
+    (repository / "pyproject.toml").write_text("[project]\nname='fixture'\n", encoding="utf-8")
+    module = repository / "src" / "fpl_bot" / "captain_review_browser.py"
+    module.parent.mkdir(parents=True)
+    module.touch()
+    profile = repository / "private-profile"
+    profile.mkdir()
+    (profile / DEDICATED_PROFILE_MARKER).write_text(
+        review_browser._STABLE_PROFILE_MARKER, encoding="utf-8"
+    )
+    monkeypatch.setattr(review_browser, "__file__", str(module))
+
+    with pytest.raises(CaptainReviewBrowserError) as raised:
+        require_dedicated_profile(profile)
+
+    assert raised.value.category == "dedicated_profile_required"
+
+
+def test_source_checkout_profile_outside_established_repository_is_accepted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repository = tmp_path / "checkout"
+    (repository / ".git").mkdir(parents=True)
+    (repository / "pyproject.toml").write_text("[project]\nname='fixture'\n", encoding="utf-8")
+    module = repository / "src" / "fpl_bot" / "captain_review_browser.py"
+    module.parent.mkdir(parents=True)
+    module.touch()
+    profile = tmp_path / "dedicated-profile"
+    monkeypatch.setattr(review_browser, "__file__", str(module))
+
+    assert prepare_dedicated_profile(profile) == profile.resolve()
+    assert require_dedicated_profile(profile) == profile.resolve()
+
+
+def test_flattened_worker_accepts_marked_sibling_profile(tmp_path: Path, monkeypatch) -> None:
+    common_root = tmp_path / "FPLBot"
+    module = common_root / "CaptainCloudWorker01" / "fpl_bot" / "captain_review_browser.py"
+    module.parent.mkdir(parents=True)
+    module.touch()
+    profile = common_root / "FPLReviewCaptainProfile"
+    monkeypatch.setattr(review_browser, "__file__", str(module))
+
+    assert prepare_dedicated_profile(profile) == profile.resolve()
+    assert require_dedicated_profile(profile) == profile.resolve()
+
+
+def test_flattened_worker_rejects_profile_inside_application_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    application = tmp_path / "FPLBot" / "CaptainCloudWorker01"
+    module = application / "fpl_bot" / "captain_review_browser.py"
+    module.parent.mkdir(parents=True)
+    module.touch()
+    profile = application / "profile"
+    profile.mkdir()
+    (profile / DEDICATED_PROFILE_MARKER).write_text(
+        review_browser._STABLE_PROFILE_MARKER, encoding="utf-8"
+    )
+    monkeypatch.setattr(review_browser, "__file__", str(module))
+
+    with pytest.raises(CaptainReviewBrowserError) as raised:
+        require_dedicated_profile(profile)
+
+    assert raised.value.category == "dedicated_profile_required"
+
+
+def test_flattened_worker_still_requires_exact_profile_provenance_marker(
+    tmp_path: Path, monkeypatch
+) -> None:
+    common_root = tmp_path / "FPLBot"
+    module = common_root / "CaptainCloudWorker01" / "fpl_bot" / "captain_review_browser.py"
+    module.parent.mkdir(parents=True)
+    module.touch()
+    profile = common_root / "FPLReviewCaptainProfile"
+    profile.mkdir()
+    marker = profile / DEDICATED_PROFILE_MARKER
+    monkeypatch.setattr(review_browser, "__file__", str(module))
+
+    with pytest.raises(CaptainReviewBrowserError) as missing:
+        require_dedicated_profile(profile)
+    marker.write_text("unexpected marker\n", encoding="utf-8")
+    with pytest.raises(CaptainReviewBrowserError) as invalid:
+        require_dedicated_profile(profile)
+    marker.write_text(review_browser._STABLE_PROFILE_MARKER, encoding="utf-8")
+
+    assert missing.value.category == "dedicated_profile_required"
+    assert invalid.value.category == "dedicated_profile_required"
+    assert require_dedicated_profile(profile) == profile.resolve()
+
+
 def test_ordinary_default_chrome_profile_is_always_rejected(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     ordinary_profile = tmp_path / "Google" / "Chrome" / "User Data"

@@ -1074,15 +1074,34 @@ def _require_profile_outside_repository(profile_directory: Path) -> Path:
         raise CaptainReviewBrowserError("dedicated_profile_required")
     resolved = profile_directory.expanduser().resolve()
     reject_personal_profile(resolved)
-    repository = Path(__file__).resolve().parents[2]
-    if resolved == repository or repository in resolved.parents:
+
+    module_file = Path(__file__).resolve()
+    application_root = module_file.parent.parent
+    if _is_within(resolved, application_root):
         raise CaptainReviewBrowserError("dedicated_profile_required")
+
+    repository = _find_repository_root(module_file)
+    if repository is not None and _is_within(resolved, repository):
+        raise CaptainReviewBrowserError("dedicated_profile_required")
+
     local_app_data = os.environ.get("LOCALAPPDATA")
     if local_app_data:
         ordinary_chrome_root = (Path(local_app_data) / "Google" / "Chrome" / "User Data").resolve()
         if resolved == ordinary_chrome_root or ordinary_chrome_root in resolved.parents:
             raise CaptainReviewBrowserError("dedicated_profile_required")
     return resolved
+
+
+def _find_repository_root(module_file: Path) -> Path | None:
+    """Return an established source root, never one inferred from package depth."""
+    for candidate in module_file.resolve().parents:
+        if (candidate / ".git").exists() and (candidate / "pyproject.toml").is_file():
+            return candidate
+    return None
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
 
 
 def _wait_for_projections_view(

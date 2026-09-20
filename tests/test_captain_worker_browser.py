@@ -233,6 +233,37 @@ def test_missing_and_inaccessible_profiles_are_distinct_safe_evidence(tmp_path, 
     assert "PRIVATE_PATH_SENTINEL" not in repr(diagnostic) + repr(diagnostic.to_payload())
 
 
+def test_application_local_profile_is_rejected_before_browser_resolution(tmp_path, monkeypatch):
+    application = tmp_path / "FPLBot" / "CaptainCloudWorker01"
+    module = application / "fpl_bot" / "captain_review_browser.py"
+    module.parent.mkdir(parents=True)
+    module.touch()
+    profile = application / "profile"
+    profile.mkdir()
+    (profile / review.DEDICATED_PROFILE_MARKER).write_text(
+        review._STABLE_PROFILE_MARKER, encoding="utf-8"
+    )
+    monkeypatch.setattr(review, "__file__", str(module))
+    browser_resolution_calls = []
+    monkeypatch.setattr(
+        review,
+        "find_stable_chrome_executable",
+        lambda: browser_resolution_calls.append(True),
+    )
+
+    with pytest.raises(AcquisitionDiagnosticError) as raised:
+        bridge.ProvenBrowserAcquisition(profile).acquire(6)
+
+    diagnostic = raised.value.diagnostic
+    assert diagnostic.code == AcquisitionFailureCode.PROFILE_MISSING_OR_INACCESSIBLE
+    assert diagnostic.stage == AcquisitionStage.PROFILE_VALIDATION
+    assert diagnostic.profile_directory_exists
+    assert not diagnostic.browser_executable_resolved
+    assert not diagnostic.browser_process_created
+    assert not diagnostic.navigation_began
+    assert browser_resolution_calls == []
+
+
 def test_unexpected_browser_exception_is_sanitized(tmp_path, monkeypatch):
     profile = tmp_path / "profile"
     profile.mkdir()
