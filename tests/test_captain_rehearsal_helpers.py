@@ -135,3 +135,9 @@ def test_rehearsal_scripts_parse_in_windows_powershell():
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_rehearsal_operator_supports_bounded_reconciliation():
+    source = (ROOT / "deploy/captain-rehearsal-operator.yaml").read_text(encoding="utf-8")
+    assert "elif action == 'reconcile':" in source
+    assert "route = '/captain/control/reconcile'" in source

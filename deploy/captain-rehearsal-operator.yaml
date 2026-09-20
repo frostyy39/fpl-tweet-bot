@@ -60,6 +60,9 @@ spec:
                   elif action == 'inspect':
                       route = '/captain/control/inspect'
                       payload = {}
+                  elif action == 'reconcile':
+                      route = '/captain/control/reconcile'
+                      payload = {}
                   else:
                       raise SystemExit('unsupported operator action')
 
