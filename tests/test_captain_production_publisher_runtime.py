@@ -9,6 +9,7 @@ from fpl_bot.captain_production_publisher_runtime import (
     PRODUCTION_TOKEN_SECRET,
     ProductionCaptainPublisherConfig,
 )
+from fpl_bot.captain_publisher_http import PublisherAuthConfig
 from fpl_bot.runtime_config import ProductionConfigurationError
 
 PRODUCTION_ID = "987654321012345678"
@@ -45,6 +46,14 @@ def test_production_runtime_is_disabled_and_uses_only_production_authority():
     assert config.destination_user_id == PRODUCTION_ID
     assert config.posting_enabled is False
     assert all(getattr(config, field.name) != "(default)" for field in fields(config))
+
+
+def test_production_publisher_invoker_is_an_explicit_supported_boundary():
+    config = ProductionCaptainPublisherConfig.environment(
+        environment(), configured_user_id=PRODUCTION_ID
+    )
+    auth = PublisherAuthConfig(config.origin, config.invoker_email)
+    assert auth.invoker_email.startswith("captain-prod-pub-invoker@")
 
 
 def test_production_runtime_cannot_start_before_reviewed_identity_is_committed():

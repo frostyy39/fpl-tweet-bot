@@ -8,6 +8,11 @@ from fpl_bot.captain_http import RequestAuthorizer
 from fpl_bot.captain_publisher import PublicationInstruction, PublishStatus
 from fpl_bot.captain_state import StateConflict
 
+PUBLISHER_INVOKER_PREFIXES = (
+    "captain-publisher-invoker@",
+    "captain-prod-pub-invoker@",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class PublisherAuthConfig:
@@ -15,8 +20,8 @@ class PublisherAuthConfig:
     invoker_email: str
 
     def __post_init__(self) -> None:
-        if not self.audience.startswith("https://") or not self.invoker_email.startswith(
-            "captain-publisher-invoker@"
+        if not self.audience.startswith("https://") or not any(
+            self.invoker_email.startswith(prefix) for prefix in PUBLISHER_INVOKER_PREFIXES
         ):
             raise ValueError("dedicated Captain publisher invocation identity required")
 
