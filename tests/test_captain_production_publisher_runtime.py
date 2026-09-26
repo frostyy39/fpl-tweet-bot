@@ -101,6 +101,7 @@ def test_reproducible_production_deployment_is_disabled_private_and_unscheduled(
     root = Path(__file__).parents[1]
     deploy = (root / "deploy/deploy-captain-production-publisher.ps1").read_text(encoding="utf-8")
     provision = (root / "deploy/provision-production-x-oauth.ps1").read_text(encoding="utf-8")
+    build = (root / "deploy/captain-production-publisher-build.yaml").read_text(encoding="utf-8")
     dockerfile = (root / "deploy/CaptainProductionPublisher.Dockerfile").read_text(encoding="utf-8")
     assert "X_POSTING_ENABLED=false" in deploy
     assert "X_ENVIRONMENT=production" in deploy
@@ -113,4 +114,7 @@ def test_reproducible_production_deployment_is_disabled_private_and_unscheduled(
     assert "cloud scheduler" not in deploy.casefold()
     assert "gcloud tasks" not in deploy.casefold()
     assert "databases/(default)" not in provision
+    assert "captain-build@" in provision
+    assert "roles/storage.objectViewer" in provision
+    assert "logging: CLOUD_LOGGING_ONLY" in build
     assert "captain_production_publisher_runtime:create_app()" in dockerfile

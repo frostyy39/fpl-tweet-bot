@@ -88,6 +88,10 @@ same schema-2 coordinator. Finally, a commit-tagged production publisher image i
 than accepting a destination parameter, deploys privately with `X_POSTING_ENABLED=false`, and adds
 only `captain-prod-pub-invoker` as invoker. No Scheduler or Cloud Task is created.
 
+Cloud Build uses the existing `captain-build` identity, repository-scoped Artifact Registry writer
+access, source-bucket object-viewer access and Cloud Logging only. The default Compute service
+account is not granted image-push authority.
+
 ## Future Good Luck production migration
 
 Good Luck remains on FPLBotTest in this milestone. Before GW6 production promotion it needs a

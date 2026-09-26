@@ -9,6 +9,8 @@ $location = 'europe-west2'
 $tokenSecret = 'production-x-oauth-token-state'
 $runtime = "captain-production-publisher@$project.iam.gserviceaccount.com"
 $invoker = "captain-prod-pub-invoker@$project.iam.gserviceaccount.com"
+$build = "captain-build@$project.iam.gserviceaccount.com"
+$sourceBucket = "gs://$project`_cloudbuild"
 $versionRoleId = 'captainXTokenVersionWriter'
 $versionRole = "projects/$project/roles/$versionRoleId"
 $versionPermissions = @(
@@ -51,6 +53,9 @@ if ($accounts -notcontains $invoker) {
     Cloud iam service-accounts create captain-prod-pub-invoker "--project=$project" `
         '--display-name=Captain production publisher invoker'
 }
+if ($accounts -notcontains $build) {
+    throw 'The reviewed Captain build identity is unavailable.'
+}
 
 $secrets = Cloud secrets list "--project=$project" '--format=value(name)'
 if ($secrets -notcontains $tokenSecret) {
@@ -76,6 +81,8 @@ foreach ($secret in $staticSecrets) {
     Cloud secrets add-iam-policy-binding $secret "--project=$project" "--member=$member" `
         '--role=roles/secretmanager.secretAccessor'
 }
+Cloud storage buckets add-iam-policy-binding $sourceBucket `
+    "--member=serviceAccount:$build" '--role=roles/storage.objectViewer'
 
 $projectPolicy = Cloud projects get-iam-policy $project '--format=json' | ConvertFrom-Json
 $unconditionalDatastore = @(
