@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from flask import Flask, jsonify, request
 
 from fpl_bot.captain_http import RequestAuthorizer
-from fpl_bot.captain_publisher import PublicationInstruction, PublishStatus
+from fpl_bot.captain_publication import PublicationInstruction
+from fpl_bot.captain_publisher import PublishStatus
 from fpl_bot.captain_state import StateConflict
 
 PUBLISHER_INVOKER_PREFIXES = (

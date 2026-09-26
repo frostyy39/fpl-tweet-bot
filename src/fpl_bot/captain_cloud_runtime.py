@@ -122,8 +122,10 @@ def compose(
     authorizer,
     *,
     audit_sink=None,
+    publisher_router=None,
 ):
     """Injectable composition for offline tests and the isolated real cloud runtime."""
+    no_post = publisher_router is None
     controller = CaptainController(repository, source, clock, operations)
     service = WorkerControllerService(repository, source, clock, config.destination_user_id)
     compute = CaptainComputeReconciler(repository, operations, provider, clock.now)
@@ -137,6 +139,7 @@ def compose(
         authorizer,
         CaptainAuthConfig(config.origin, config.origin, config.worker_email, config.tasks_email),
         candidate_validator=AuditedValidator(validator, audit_sink) if audit_sink else validator,
+        publication_router=publisher_router,
     )
 
     @app.post("/captain/control/tick")
@@ -148,7 +151,7 @@ def compose(
         outcome = driver.advance()
         return jsonify(
             {
-                "no_post": True,
+                "no_post": no_post,
                 "vm": outcome,
                 "generations": [str(p.generation.assignment.generation_id) for p in planned],
             }
@@ -156,6 +159,8 @@ def compose(
 
     @app.post("/captain/control/rehearsal")
     def rehearsal():
+        if publisher_router is not None:
+            raise PermissionError("production controller has no rehearsal endpoint")
         caller = authorizer.authorize(request.headers.get("Authorization", ""), config.origin)
         if caller.email != config.planner_email:
             raise PermissionError("planner identity denied")
@@ -181,7 +186,7 @@ def compose(
         binding = repository.rehearsal(result.generation.assignment.generation_id)
         return jsonify(
             {
-                "no_post": True,
+                "no_post": no_post,
                 "postable": False,
                 "purpose": binding.purpose,
                 "vm": outcome,
@@ -198,7 +203,13 @@ def compose(
         caller = authorizer.authorize(request.headers.get("Authorization", ""), config.origin)
         if caller.email != config.planner_email:
             raise PermissionError("planner identity denied")
-        return jsonify({"no_post": True, "postable": False, "vm": driver.advance()})
+        return jsonify(
+            {
+                "no_post": no_post,
+                "postable": not no_post,
+                "vm": driver.advance(),
+            }
+        )
 
     @app.post("/captain/control/inspect")
     def inspect():
@@ -218,7 +229,7 @@ def compose(
         )
         return jsonify(
             {
-                "no_post": True,
+                "no_post": no_post,
                 "database": config.database,
                 "generation": to_document(generation),
                 "rehearsal": to_document(binding),
@@ -255,12 +266,16 @@ def compose(
                 # provider response bodies or turn an acknowledged handoff into
                 # an ambiguous transport failure merely because cleanup failed.
                 app.logger.error("captain_reconciliation_pending")
-        response.headers["X-Captain-No-Post"] = "true"
+        response.headers["X-Captain-Posting-Route"] = (
+            "disabled" if publisher_router is None else "production"
+        )
+        if publisher_router is None:
+            response.headers["X-Captain-No-Post"] = "true"
         return response
 
     @app.errorhandler(StateConflict)
     def conflict(_):
-        return jsonify({"error": "captain_state_conflict", "no_post": True}), 409
+        return jsonify({"error": "captain_state_conflict", "no_post": no_post}), 409
 
     return app
 

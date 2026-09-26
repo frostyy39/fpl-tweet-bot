@@ -9,6 +9,7 @@ from flask import Flask, jsonify, request
 from fpl_bot.captain_controller import CaptainController
 from fpl_bot.captain_handoff import ProjectionHandoff
 from fpl_bot.captain_orchestration_timing import require_utc, utc_text
+from fpl_bot.captain_publication_tasks import instruction_for_candidate
 from fpl_bot.captain_serialization import from_document
 from fpl_bot.captain_state import GenerationStatus, PostKey, StateConflict, TaskKind
 from fpl_bot.captain_task_handlers import decode_task_payload
@@ -205,6 +206,7 @@ def create_captain_app(
     auth: CaptainAuthConfig,
     *,
     candidate_validator=None,
+    publication_router=None,
 ):
     app = Flask("captain-controller")
 
@@ -304,6 +306,26 @@ def create_captain_app(
             if attempt is None or attempt.handoff is None:
                 raise StateConflict("publish lacks accepted handoff")
             candidate = candidate_validator.validate(generation.key, attempt.handoff)
+            if publication_router is not None:
+                if publication_router.destination_user_id != generation.key.destination_user_id:
+                    raise StateConflict("publisher destination does not match generation")
+                if controller.repository.rehearsal(assignment.generation_id) is not None:
+                    raise StateConflict("non-postable rehearsal cannot route to publisher")
+                record = controller.repository.candidate(assignment.generation_id)
+                if record is None:
+                    raise StateConflict("validated candidate was not persisted")
+                instruction = instruction_for_candidate(record)
+                confirmation = publication_router.ensure(instruction, record.validated_at_utc)
+                return jsonify(
+                    {
+                        "status": "publication_enqueued",
+                        "event_id": candidate.key.event_id,
+                        "event_code": candidate.assignment.event_code,
+                        "weighted_length": candidate.weighted_length,
+                        "publication_identity": confirmation.identity,
+                        "publication_digest": confirmation.digest,
+                    }
+                )
             return jsonify(
                 {
                     "status": "validated_candidate",

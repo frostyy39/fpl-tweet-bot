@@ -103,7 +103,9 @@ def test_reproducible_production_deployment_is_disabled_private_and_unscheduled(
     provision = (root / "deploy/provision-production-x-oauth.ps1").read_text(encoding="utf-8")
     build = (root / "deploy/captain-production-publisher-build.yaml").read_text(encoding="utf-8")
     dockerfile = (root / "deploy/CaptainProductionPublisher.Dockerfile").read_text(encoding="utf-8")
-    assert "X_POSTING_ENABLED=false" in deploy
+    assert "[switch]$EnablePosting" in deploy
+    assert "if ($EnablePosting) { 'true' } else { 'false' }" in deploy
+    assert "production_readiness" in deploy
     assert "X_ENVIRONMENT=production" in deploy
     assert "production-shared-x-oauth" in deploy
     assert "production-x-oauth-token-state" in deploy

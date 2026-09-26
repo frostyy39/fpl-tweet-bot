@@ -1,6 +1,9 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [Parameter(Mandatory=$true)][string]$Image
+    [Parameter(Mandatory=$true)][string]$Image,
+    [switch]$EnablePosting,
+    [int]$ExpectedEventId,
+    [string]$ExpectedDeadlineUtc
 )
 
 $ErrorActionPreference = 'Stop'
@@ -25,6 +28,21 @@ if (-not $identityMatch.Success) {
     throw 'Reviewed production X identity is not committed; deployment is prohibited.'
 }
 $productionUserId = $identityMatch.Groups[1].Value
+$postingEnabled = if ($EnablePosting) { 'true' } else { 'false' }
+if ($EnablePosting) {
+    if ($ExpectedEventId -lt 1 -or -not $ExpectedDeadlineUtc) {
+        throw 'Posting enablement requires the separately reviewed event ID and deadline.'
+    }
+    $python = Join-Path $PSScriptRoot '..\.venv\Scripts\python.exe'
+    if (-not (Test-Path -LiteralPath $python)) {
+        throw 'The reviewed local Python environment is required for fresh FPL validation.'
+    }
+    & $python -m fpl_bot.production_readiness '--expected-event-id' $ExpectedEventId `
+        '--expected-deadline-utc' $ExpectedDeadlineUtc
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Fresh official FPL target validation rejected Good Luck enablement.'
+    }
+}
 if ($Image -notmatch '^europe-west2-docker\.pkg\.dev/fpl-frosty-bot-v1/good-luck-images/production:[a-f0-9]{40}$') {
     throw 'A commit-tagged production Good Luck image is required.'
 }
@@ -36,7 +54,7 @@ function Cloud {
     }
 }
 
-if (-not $PSCmdlet.ShouldProcess($project, 'Deploy disabled production Good Luck resources')) {
+if (-not $PSCmdlet.ShouldProcess($project, "Deploy production Good Luck posting=$postingEnabled")) {
     return
 }
 
@@ -61,7 +79,7 @@ $settings = @(
     'X_TOKEN_SECRET_ID=production-x-oauth-token-state',
     'X_ENVIRONMENT=production',
     "X_EXPECTED_USER_ID=$productionUserId",
-    'X_POSTING_ENABLED=false'
+    "X_POSTING_ENABLED=$postingEnabled"
 ) -join ','
 $secrets = @(
     'X_OAUTH_CLIENT_ID=x-oauth-client-id:latest',
@@ -125,4 +143,4 @@ $tasks = @(Cloud tasks list "--queue=$queue" "--project=$project" `
 if ($queueState -ne 'PAUSED' -or $schedulerState -ne 'PAUSED' -or $tasks.Count -ne 0) {
     throw 'Production Good Luck scheduling boundary is not safely paused and empty.'
 }
-Write-Output "Disabled production Good Luck deployed for immutable X user $productionUserId."
+Write-Output "Production Good Luck deployed posting=$postingEnabled for immutable X user $productionUserId."

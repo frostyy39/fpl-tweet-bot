@@ -437,8 +437,23 @@ The separately reviewed production-account Good Luck boundary is documented in
 provisioning and deployment entry points are `provision-production-good-luck.ps1` and
 `deploy-production-good-luck.ps1`. They use an isolated named business database, queue, Scheduler,
 runtime/build/invoker identities and image repository, while sharing only the schema-2 production X
-authority with production Captain. Deployment always sets `X_POSTING_ENABLED=false`, pauses the
-production queue and Scheduler, and requires both to be empty/paused before succeeding.
+authority with production Captain. Deployment is fail-closed by default: without
+`-EnablePosting` it sets `X_POSTING_ENABLED=false`, pauses the production queue and Scheduler, and
+requires both to be empty/paused before succeeding. The separately reviewed arming path must pass
+`-EnablePosting` plus the expected event ID and official deadline; the script re-fetches official
+FPL data and fails before deployment if either value changed. Enabling the service does not resume
+its queue or Scheduler.
+
+## Integrated GW6 production readiness
+
+The reviewed, non-executing arming order and emergency fail-closed procedure are documented in
+[`docs/gw6-production-readiness.md`](../docs/gw6-production-readiness.md). The production Captain
+controller image is built with `captain-production-controller-build.yaml` and deployed with
+`deploy-captain-production-controller.ps1`. Its publisher task carries immutable candidate IDs and
+digests, never tweet text; the worker cannot invoke either publisher.
+`provision-captain-production-routing.ps1` adds only the controller's scoped `actAs` grant on the
+dedicated production-publisher invoker. Both publisher deployment scripts remain disabled unless
+their explicit enable switch and a freshly matching event/deadline are supplied.
 
 ## Teardown
 

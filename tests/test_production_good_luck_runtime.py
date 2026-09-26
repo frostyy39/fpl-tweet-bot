@@ -177,7 +177,9 @@ def test_reproducible_deployment_is_private_disabled_and_separate():
     assert (
         "production-x-oauth-token-state" in provision and "production-x-oauth-token-state" in deploy
     )
-    assert "X_POSTING_ENABLED=false" in deploy
+    assert "[switch]$EnablePosting" in deploy
+    assert "if ($EnablePosting) { 'true' } else { 'false' }" in deploy
+    assert "production_readiness" in deploy
     assert "--no-allow-unauthenticated" in deploy
     assert '"--schedule=0 6 * * *"' in deploy
     assert "scheduler jobs pause" in deploy

@@ -7,6 +7,7 @@ from uuid import UUID
 
 import pytest
 
+import fpl_bot.captain_http as captain_http
 from fpl_bot.captain_controller import CaptainController, TaskEnvelope
 from fpl_bot.captain_handoff import (
     AuthenticationStatus,
@@ -24,6 +25,7 @@ from fpl_bot.captain_http import (
 )
 from fpl_bot.captain_memory_repository import InMemoryCaptainRepository
 from fpl_bot.captain_orchestration_timing import CaptainTiming
+from fpl_bot.captain_publication import PublicationInstruction
 from fpl_bot.captain_state import GenerationStatus, PostKey, StateConflict, TaskKind
 from fpl_bot.captain_vm_operations import InMemoryVmOperations
 from fpl_bot.captain_worker import ReleaseGrant, WorkerAssignment
@@ -271,6 +273,80 @@ def test_publish_candidate_handler_uses_envelope_assignment():
         "event_code": "GW5",
         "weighted_length": 204,
     }
+
+
+def test_publish_handler_routes_only_persisted_candidate_identity(monkeypatch):
+    controller, service, authorizer, _, generation, _ = setup()
+    handoff = object()
+    persisted = SimpleNamespace(validated_at_utc=generation.assignment.timing.target_utc)
+    instruction = PublicationInstruction(
+        generation.assignment.generation_id,
+        UUID(int=93),
+        "a" * 64,
+        "b" * 64,
+        UUID(int=94),
+    )
+    controller.deliver = lambda envelope: SimpleNamespace(status="publish_eligible_no_write")
+    controller.repository.generation = lambda generation_id: generation
+    controller.repository.generation_acquisition = lambda generation_id: SimpleNamespace(
+        handoff=handoff
+    )
+    controller.repository.candidate = lambda generation_id: persisted
+    controller.repository.rehearsal = lambda generation_id: None
+    monkeypatch.setattr(captain_http, "instruction_for_candidate", lambda value: instruction)
+
+    class Validator:
+        def validate(self, key, received):
+            return SimpleNamespace(
+                key=key,
+                assignment=generation.assignment,
+                weighted_length=204,
+            )
+
+    class Router:
+        destination_user_id = generation.key.destination_user_id
+
+        def ensure(self, received, scheduled_at):
+            assert received is instruction
+            assert scheduled_at == persisted.validated_at_utc
+            return SimpleNamespace(identity="captain-x-generation", digest="c" * 64)
+
+    auth = CaptainAuthConfig(
+        "https://captain.invalid/worker",
+        "https://captain.invalid/tasks",
+        "worker@captain.invalid",
+        "tasks@captain.invalid",
+    )
+    app = create_captain_app(
+        service,
+        controller,
+        authorizer,
+        auth,
+        candidate_validator=Validator(),
+        publication_router=Router(),
+    )
+    envelope = TaskEnvelope(
+        generation.key.destination_user_id,
+        generation.assignment,
+        TaskKind.PUBLISH,
+        generation.assignment.timing.target_utc,
+    )
+    response = app.test_client().post(
+        "/captain/tasks/publish",
+        json={
+            "version": 1,
+            "identity": envelope.identity,
+            "digest": envelope.digest,
+            "destination_user_id": envelope.destination_user_id,
+            "assignment": envelope.assignment.to_payload(),
+            "kind": envelope.kind.value,
+            "scheduled_at": envelope.scheduled_at.isoformat().replace("+00:00", "Z"),
+        },
+        headers={"Authorization": "Bearer opaque"},
+    )
+    assert response.status_code == 200
+    assert response.json["status"] == "publication_enqueued"
+    assert response.json["publication_identity"] == "captain-x-generation"
 
 
 def release_setup():
