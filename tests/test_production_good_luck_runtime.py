@@ -187,3 +187,31 @@ def test_reproducible_deployment_is_private_disabled_and_separate():
     assert "production_good_luck_runtime:create_app()" in dockerfile
     assert "fpl-bot-runtime@" not in provision
     assert "fpl-bot-invoker@" not in deploy
+
+
+def test_live_probe_definitions_are_non_posting_and_cover_effective_boundaries():
+    root = Path(__file__).parents[1]
+    names = (
+        "production-good-luck-isolation-probe.yaml",
+        "test-good-luck-production-denial-probe.yaml",
+        "production-good-luck-invocation-probe.yaml",
+        "production-good-luck-wrong-caller-probe.yaml",
+        "production-good-luck-identity-probe.yaml",
+    )
+    probes = [(root / "deploy" / name).read_text(encoding="utf-8") for name in names]
+    assert "good-luck-production-runtime@" in probes[0]
+    assert "fpl-bot-runtime@" in probes[1]
+    assert "good-luck-production-invoker@" in probes[2]
+    assert "captain-worker@" in probes[3]
+    assert "fpl-bot-x-verify" in probes[4]
+    assert "X_POSTING_ENABLED" in probes[4] and "'false'" in probes[4]
+    assert "1249335464571650048" in probes[4]
+    assert "production-good-luck-state" in probes[0] and "'(default)'" in probes[0]
+    assert "production-shared-x-oauth" in probes[0] and "shared-x-oauth" in probes[0]
+    assert "body" not in probes[0]
+    assert "results == [(200, {'status': 'disabled'})] * 3" in probes[2]
+    for probe in probes:
+        assert "/2/tweets" not in probe
+        assert "create_text_post" not in probe
+        assert "X_POSTING_ENABLED=true" not in probe
+        assert "print(token" not in probe

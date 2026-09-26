@@ -1,0 +1,41 @@
+# Temporary read-only denial proof under the existing FPLBotTest Good Luck identity.
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: test-good-luck-production-denial-probe
+  namespace: fpl-frosty-bot-v1
+spec:
+  template:
+    spec:
+      taskCount: 1
+      parallelism: 1
+      template:
+        spec:
+          serviceAccountName: fpl-bot-runtime@fpl-frosty-bot-v1.iam.gserviceaccount.com
+          maxRetries: 0
+          timeoutSeconds: '120'
+          containers:
+            - image: europe-west2-docker.pkg.dev/fpl-frosty-bot-v1/good-luck-images/production@sha256:99299d18a7bda92427736fc66abc69d02abc4464de389139954d16ae51e2c010
+              command: [python]
+              args:
+                - '-c'
+                - |
+                  import json
+                  from google.api_core.exceptions import PermissionDenied
+                  from google.cloud import firestore, secretmanager
+                  project = 'fpl-frosty-bot-v1'
+                  evidence = {}
+                  for database, label in (('production-good-luck-state', 'production_state'), ('production-shared-x-oauth', 'production_oauth')):
+                      try:
+                          firestore.Client(project=project, database=database).collection('iam_probe').document('read-only').get()
+                      except PermissionDenied:
+                          evidence[label] = 'denied'
+                      else:
+                          raise RuntimeError(label + ' unexpectedly readable')
+                  try:
+                      secretmanager.SecretManagerServiceClient().access_secret_version(request={'name': 'projects/' + project + '/secrets/production-x-oauth-token-state/versions/latest'})
+                  except PermissionDenied:
+                      evidence['production_token_secret'] = 'denied'
+                  else:
+                      raise RuntimeError('production token secret unexpectedly readable')
+                  print(json.dumps(evidence, sort_keys=True))

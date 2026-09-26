@@ -1,0 +1,49 @@
+# Temporary no-post proof for the sole production Good Luck invoker.
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: production-good-luck-invocation-probe
+  namespace: fpl-frosty-bot-v1
+spec:
+  template:
+    spec:
+      taskCount: 1
+      parallelism: 1
+      template:
+        spec:
+          serviceAccountName: good-luck-production-invoker@fpl-frosty-bot-v1.iam.gserviceaccount.com
+          maxRetries: 0
+          timeoutSeconds: '120'
+          containers:
+            - image: europe-west2-docker.pkg.dev/fpl-frosty-bot-v1/good-luck-images/production@sha256:99299d18a7bda92427736fc66abc69d02abc4464de389139954d16ae51e2c010
+              command: [python]
+              args:
+                - '-c'
+                - |
+                  import json
+                  from urllib.error import HTTPError
+                  from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+                  origin = 'https://good-luck-production-524790767721.europe-west1.run.app'
+                  class NoRedirect(HTTPRedirectHandler):
+                      def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+                          return None
+                  opener = build_opener(NoRedirect)
+                  def invoke(path, token=None):
+                      headers = {'Content-Type': 'application/json'}
+                      if token:
+                          headers['Authorization'] = 'Bearer ' + token
+                      request = Request(origin + path, data=b'{}', headers=headers, method='POST')
+                      try:
+                          with opener.open(request, timeout=15) as response:
+                              return response.status, json.loads(response.read())
+                      except HTTPError as error:
+                          return error.code, None
+                  anonymous, _ = invoke('/checker/run')
+                  metadata = Request('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=' + origin + '&format=full', headers={'Metadata-Flavor': 'Google'})
+                  with urlopen(metadata, timeout=10) as response:
+                      token = response.read().decode()
+                  results = [invoke(path, token) for path in ('/checker/run', '/tasks/preflight', '/tasks/deadline')]
+                  del token
+                  assert anonymous == 403
+                  assert results == [(200, {'status': 'disabled'})] * 3
+                  print(json.dumps({'anonymous': 'denied', 'dedicated_invoker': 'disabled_no_state'}, sort_keys=True))

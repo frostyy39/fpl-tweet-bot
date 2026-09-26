@@ -1,0 +1,81 @@
+# Temporary no-post IAM and fresh-FPL probe under production Good Luck runtime identity.
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: production-good-luck-isolation-probe
+  namespace: fpl-frosty-bot-v1
+spec:
+  template:
+    spec:
+      taskCount: 1
+      parallelism: 1
+      template:
+        spec:
+          serviceAccountName: good-luck-production-runtime@fpl-frosty-bot-v1.iam.gserviceaccount.com
+          maxRetries: 0
+          timeoutSeconds: '120'
+          containers:
+            - image: europe-west2-docker.pkg.dev/fpl-frosty-bot-v1/good-luck-images/production@sha256:99299d18a7bda92427736fc66abc69d02abc4464de389139954d16ae51e2c010
+              command: [python]
+              args:
+                - '-c'
+                - |
+                  import json, uuid
+                  import google.auth
+                  from google.api_core.exceptions import PermissionDenied
+                  from google.auth.transport.requests import AuthorizedSession
+                  from google.cloud import firestore, secretmanager
+                  from fpl_bot.api import FplApiClient
+                  from fpl_bot.cloud_token_store import CloudXTokenStateStoreConfig, _parse_metadata
+                  from fpl_bot.events import parse_events, select_next_event
+                  project = 'fpl-frosty-bot-v1'
+                  user_id = '1249335464571650048'
+                  evidence = {}
+                  state = firestore.Client(project=project, database='production-good-luck-state')
+                  probe = state.collection('production_good_luck_iam_probes').document(uuid.uuid4().hex)
+                  probe.create({'classification': 'non_postable_iam_probe'})
+                  try:
+                      assert probe.get().to_dict() == {'classification': 'non_postable_iam_probe'}
+                      evidence['production_state'] = 'read_write_passed'
+                  finally:
+                      probe.delete()
+                  evidence['posting_records'] = sum(1 for _ in state.collection('fpl_event_posts').stream())
+                  oauth = firestore.Client(project=project, database='production-shared-x-oauth')
+                  raw = oauth.collection('x_oauth_token_authority').document('x-user-' + user_id).get().to_dict()
+                  authority = _parse_metadata(raw, CloudXTokenStateStoreConfig(project, 'production-x-oauth-token-state', user_id))
+                  assert authority.refresh_lease_owner is None
+                  evidence['production_oauth'] = {
+                      'revision': authority.revision,
+                      'current_secret_version': authority.secret_version_name.rsplit('/', 1)[-1],
+                      'previous_secret_version': authority.previous_secret_version_name.rsplit('/', 1)[-1] if authority.previous_secret_version_name else None,
+                      'attempt': authority.refresh_attempt.state.value if authority.refresh_attempt else 'none',
+                      'lease_clear': authority.refresh_lease_owner is None,
+                  }
+                  secret = secretmanager.SecretManagerServiceClient().access_secret_version(request={'name': authority.secret_version_name}).payload.data
+                  assert secret
+                  del secret
+                  evidence['production_token_secret'] = 'access_passed_without_output'
+                  for database, label in (('(default)', 'test_business_state'), ('shared-x-oauth', 'test_oauth'), ('captain-state', 'captain_state')):
+                      denied = firestore.Client(project=project, database=database).collection('iam_probe').document('read-only')
+                      try:
+                          denied.get()
+                      except PermissionDenied:
+                          evidence[label] = 'denied'
+                      else:
+                          raise RuntimeError(label + ' unexpectedly readable')
+                  try:
+                      secretmanager.SecretManagerServiceClient().access_secret_version(request={'name': 'projects/' + project + '/secrets/x-oauth-token-state/versions/latest'})
+                  except PermissionDenied:
+                      evidence['test_token_secret'] = 'denied'
+                  else:
+                      raise RuntimeError('test token secret unexpectedly readable')
+                  credentials, _ = google.auth.default(scopes=['https://www.googleapis.com/auth/cloud-platform'])
+                  response = AuthorizedSession(credentials).get('https://compute.googleapis.com/compute/v1/projects/' + project + '/zones/europe-west2-b/instances/captain-browser-london-windows-trial', timeout=10, allow_redirects=False)
+                  assert response.status_code == 403
+                  evidence['compute'] = 'denied'
+                  source = FplApiClient()
+                  bootstrap = source.fetch_bootstrap_static()
+                  event = select_next_event(parse_events(bootstrap['events']))
+                  fixtures = source.fetch_event_fixtures(event.event_id)
+                  evidence['fresh_fpl'] = {'event_id': event.event_id, 'deadline': event.deadline_utc.isoformat(), 'fixtures': len(fixtures)}
+                  print(json.dumps(evidence, sort_keys=True))

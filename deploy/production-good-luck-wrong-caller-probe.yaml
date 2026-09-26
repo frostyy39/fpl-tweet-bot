@@ -1,0 +1,41 @@
+# Temporary authenticated denial proof under the Captain Windows worker identity.
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: production-good-luck-wrong-caller-probe
+  namespace: fpl-frosty-bot-v1
+spec:
+  template:
+    spec:
+      taskCount: 1
+      parallelism: 1
+      template:
+        spec:
+          serviceAccountName: captain-worker@fpl-frosty-bot-v1.iam.gserviceaccount.com
+          maxRetries: 0
+          timeoutSeconds: '120'
+          containers:
+            - image: europe-west2-docker.pkg.dev/fpl-frosty-bot-v1/good-luck-images/production@sha256:99299d18a7bda92427736fc66abc69d02abc4464de389139954d16ae51e2c010
+              command: [python]
+              args:
+                - '-c'
+                - |
+                  import json
+                  from urllib.error import HTTPError
+                  from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+                  origin = 'https://good-luck-production-524790767721.europe-west1.run.app'
+                  metadata = Request('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=' + origin + '&format=full', headers={'Metadata-Flavor': 'Google'})
+                  with urlopen(metadata, timeout=10) as response:
+                      token = response.read().decode()
+                  class NoRedirect(HTTPRedirectHandler):
+                      def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+                          return None
+                  request = Request(origin + '/checker/run', data=b'{}', headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'}, method='POST')
+                  del token
+                  try:
+                      build_opener(NoRedirect).open(request, timeout=15)
+                  except HTTPError as error:
+                      assert error.code == 403
+                  else:
+                      raise RuntimeError('worker identity unexpectedly invoked production Good Luck')
+                  print(json.dumps({'worker_identity': 'denied'}, sort_keys=True))

@@ -1,0 +1,46 @@
+# Temporary read-only X identity proof through the production shared OAuth authority.
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: production-good-luck-identity-probe
+  namespace: fpl-frosty-bot-v1
+spec:
+  template:
+    spec:
+      taskCount: 1
+      parallelism: 1
+      template:
+        spec:
+          serviceAccountName: good-luck-production-runtime@fpl-frosty-bot-v1.iam.gserviceaccount.com
+          maxRetries: 0
+          timeoutSeconds: '120'
+          containers:
+            - image: europe-west2-docker.pkg.dev/fpl-frosty-bot-v1/good-luck-images/production@sha256:99299d18a7bda92427736fc66abc69d02abc4464de389139954d16ae51e2c010
+              command: [fpl-bot-x-verify]
+              env:
+                - name: GCP_PROJECT_ID
+                  value: fpl-frosty-bot-v1
+                - name: GCP_PROJECT_NUMBER
+                  value: '524790767721'
+                - name: FIRESTORE_DATABASE_ID
+                  value: production-good-luck-state
+                - name: X_OAUTH_FIRESTORE_DATABASE_ID
+                  value: production-shared-x-oauth
+                - name: X_TOKEN_SECRET_ID
+                  value: production-x-oauth-token-state
+                - name: X_ENVIRONMENT
+                  value: production
+                - name: X_EXPECTED_USER_ID
+                  value: '1249335464571650048'
+                - name: X_POSTING_ENABLED
+                  value: 'false'
+                - name: X_OAUTH_CLIENT_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: x-oauth-client-id
+                      key: latest
+                - name: X_OAUTH_CLIENT_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: x-oauth-client-secret
+                      key: latest
