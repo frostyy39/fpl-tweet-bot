@@ -100,7 +100,7 @@ Cloud artifacts repositories add-iam-policy-binding $repository "--project=$proj
 Cloud storage buckets add-iam-policy-binding $sourceBucket "--member=$buildMember" `
     '--role=roles/storage.objectViewer'
 Cloud projects add-iam-policy-binding $project "--member=$buildMember" `
-    '--role=roles/logging.logWriter'
+    '--role=roles/logging.logWriter' '--condition=None'
 
 $policy = Cloud projects get-iam-policy $project '--format=json' | ConvertFrom-Json
 $unconditionalDatastore = @(

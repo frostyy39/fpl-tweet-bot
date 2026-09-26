@@ -183,6 +183,7 @@ def test_reproducible_deployment_is_private_disabled_and_separate():
     assert "scheduler jobs pause" in deploy
     assert "tasks queues pause" in deploy
     assert "logging: CLOUD_LOGGING_ONLY" in build
+    assert "--condition=None" in provision
     assert "production_good_luck_runtime:create_app()" in dockerfile
     assert "fpl-bot-runtime@" not in provision
     assert "fpl-bot-invoker@" not in deploy
