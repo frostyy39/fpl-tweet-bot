@@ -92,6 +92,39 @@ Cloud Build uses the existing `captain-build` identity, repository-scoped Artifa
 access, source-bucket object-viewer access and Cloud Logging only. The default Compute service
 account is not granted image-push authority.
 
+## Completed no-post production onboarding
+
+The production authorization completed on 2026-09-26 for immutable X user ID
+`1249335464571650048`. Required scopes and a refresh token were present, and the encrypted handoff
+was created outside the repository. The bootstrap established schema-2 authority revision 1,
+pointing at production token-secret version 1. No OAuth refresh was required: the one-shot
+read-only verifier returned the same user ID through `/2/users/me`, and the authority remained at
+revision 1/version 1 with no lease or refresh attempt.
+
+The disabled publisher is `captain-production-publisher` in `europe-west1`, revision
+`captain-production-publisher-00001-kwb`. Its runtime identity is
+`captain-production-publisher@fpl-frosty-bot-v1.iam.gserviceaccount.com`; its sole Cloud Run
+invoker is `captain-prod-pub-invoker@fpl-frosty-bot-v1.iam.gserviceaccount.com`. The deployed
+environment has `X_POSTING_ENABLED=false` and the committed production numeric identity. It has no
+Scheduler or task target.
+
+Temporary, non-posting live probes established the effective boundary:
+
+- the production runtime could transact against an isolated probe record in `captain-state`, read
+  schema-2 metadata from `production-shared-x-oauth`, and access the referenced production token
+  secret without outputting its contents;
+- it was denied `(default)`, `shared-x-oauth`, the FPLBotTest token secret, and Compute instance
+  inspection;
+- the existing FPLBotTest publisher identity was denied both production OAuth metadata and the
+  production token secret;
+- anonymous and Windows-worker calls were denied by Cloud Run IAM; the sole production invoker
+  received only the server-side `disabled` response to a valid-shaped immutable instruction;
+- fresh official FPL retrieval succeeded in the deployed production runtime; and
+- the disabled invocation created no posting record or claim-index record.
+
+All temporary probe jobs are removed after their audit logs are retained. None contains an X
+create-post path, and no X write or refresh was made during onboarding.
+
 ## Future Good Luck production migration
 
 Good Luck remains on FPLBotTest in this milestone. Before GW6 production promotion it needs a
@@ -100,11 +133,16 @@ separate quiet-window review that:
 1. verifies the production authority is idle/current and the test authority remains healthy;
 2. grants the Good Luck runtime database-scoped access to `production-shared-x-oauth` and
    secret-scoped access to `production-x-oauth-token-state`;
-3. deploys Good Luck with business state still `(default)`, but production OAuth database/secret,
-   `X_ENVIRONMENT=production` and the same immutable production numeric user ID;
-4. performs read-only `/2/users/me` through the shared production authority;
-5. proves Captain/Good Luck refresh contention uses one schema-2 authority;
-6. restores the exact Scheduler/queue configuration without creating an early task or X post.
+3. provisions a separate production Good Luck service/runtime identity and separate production
+   Scheduler/queue path, retaining the current FPLBotTest service as the test path instead of
+   mutating it in place;
+4. configures that service with an independently reviewed production Good Luck business-state
+   boundary, the production OAuth database/secret, `X_ENVIRONMENT=production`, and the same
+   immutable production numeric user ID;
+5. performs read-only `/2/users/me` through the shared production authority;
+6. proves Captain/Good Luck refresh contention uses one schema-2 authority; and
+7. arms the production Scheduler/queue only after separate deadline/idempotency readiness review,
+   without altering the proven planning, rendering or duplicate-prevention logic.
 
 The test authority is not migrated, overwritten or used as fallback. Production Captain and Good
 Luck must dynamically follow the production authority's current Secret Manager version; neither may

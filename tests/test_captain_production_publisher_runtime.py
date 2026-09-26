@@ -118,3 +118,45 @@ def test_reproducible_production_deployment_is_disabled_private_and_unscheduled(
     assert "roles/storage.objectViewer" in provision
     assert "logging: CLOUD_LOGGING_ONLY" in build
     assert "captain_production_publisher_runtime:create_app()" in dockerfile
+
+
+def test_real_isolation_probes_are_non_posting_and_cover_both_directions():
+    root = Path(__file__).parents[1]
+    production = (root / "deploy/production-publisher-isolation-probe.yaml").read_text(
+        encoding="utf-8"
+    )
+    test = (root / "deploy/test-publisher-production-denial-probe.yaml").read_text(encoding="utf-8")
+    assert "captain-production-publisher@" in production
+    assert "captain-publisher@" in test
+    assert "production-shared-x-oauth" in production and "shared-x-oauth" in production
+    assert "production-shared-x-oauth" in test
+    assert "production-x-oauth-token-state" in production and "x-oauth-token-state" in production
+    assert "production-x-oauth-token-state" in test
+    assert "'(default)'" in production
+    assert "compute.googleapis.com" in production
+    assert "FplApiClient" in production
+    assert "captain_v1_posts" in production
+    assert "captain_v1_claim_index" in production
+    for probe in (production, test):
+        assert "create_post" not in probe
+        assert "/2/tweets" not in probe
+        assert "X_POSTING_ENABLED=true" not in probe
+
+
+def test_invocation_probes_keep_tokens_private_and_require_disabled_or_denied():
+    root = Path(__file__).parents[1]
+    allowed = (root / "deploy/production-publisher-invocation-probe.yaml").read_text(
+        encoding="utf-8"
+    )
+    denied = (root / "deploy/production-publisher-wrong-caller-probe.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert "captain-prod-pub-invoker@" in allowed
+    assert "captain-worker@" in denied
+    assert "NoRedirect" in allowed and "NoRedirect" in denied
+    assert "body == {'status': 'disabled'" in allowed
+    assert "error.code == 403" in denied
+    for probe in (allowed, denied):
+        assert "print(token" not in probe
+        assert "/2/tweets" not in probe
+        assert "create_post" not in probe

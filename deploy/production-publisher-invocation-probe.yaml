@@ -1,0 +1,49 @@
+# Temporary no-post invocation proof under the sole production publisher invoker identity.
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: captain-production-invocation-probe
+  namespace: fpl-frosty-bot-v1
+spec:
+  template:
+    spec:
+      taskCount: 1
+      parallelism: 1
+      template:
+        spec:
+          serviceAccountName: captain-prod-pub-invoker@fpl-frosty-bot-v1.iam.gserviceaccount.com
+          maxRetries: 0
+          timeoutSeconds: '120'
+          containers:
+            - image: europe-west2-docker.pkg.dev/fpl-frosty-bot-v1/captain-images/production-publisher@sha256:5c12b1bd4c4786fdea68f5c42453d314cd217c6ac3de923e80891117e6c17e84
+              command: [python]
+              args:
+                - '-c'
+                - |
+                  import json
+                  from urllib.error import HTTPError
+                  from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+                  origin = 'https://captain-production-publisher-524790767721.europe-west1.run.app'
+                  payload = json.dumps({'version': 1, 'generation_id': '11111111-1111-4111-8111-111111111111', 'attempt_id': '22222222-2222-4222-8222-222222222222', 'handoff_digest': 'a' * 64, 'candidate_digest': 'b' * 64, 'claim_id': '33333333-3333-4333-8333-333333333333'}).encode()
+                  class NoRedirect(HTTPRedirectHandler):
+                      def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+                          return None
+                  opener = build_opener(NoRedirect)
+                  def invoke(token=None):
+                      headers = {'Content-Type': 'application/json'}
+                      if token is not None:
+                          headers['Authorization'] = 'Bearer ' + token
+                      request = Request(origin + '/captain/publisher/execute', data=payload, headers=headers, method='POST')
+                      try:
+                          with opener.open(request, timeout=15) as response:
+                              return response.status, json.loads(response.read())
+                      except HTTPError as error:
+                          return error.code, None
+                  anonymous, _ = invoke()
+                  metadata = Request('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=' + origin + '&format=full', headers={'Metadata-Flavor': 'Google'})
+                  with urlopen(metadata, timeout=10) as response:
+                      token = response.read().decode()
+                  authenticated, body = invoke(token)
+                  del token
+                  assert anonymous == 403 and authenticated == 200 and body == {'status': 'disabled', 'event_id': None, 'post_id': None}
+                  print(json.dumps({'anonymous': 'denied', 'dedicated_invoker': 'disabled_no_write'}, sort_keys=True))
