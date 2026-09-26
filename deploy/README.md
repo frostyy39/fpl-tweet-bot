@@ -430,6 +430,16 @@ the new authority and expected identity have been verified. This recovery flow d
 fresh test-account authorization and does not assume anything about whether Client Secret rotation
 invalidates an older refresh token.
 
+## Disabled production Good Luck
+
+The separately reviewed production-account Good Luck boundary is documented in
+[`docs/production-good-luck-onboarding.md`](../docs/production-good-luck-onboarding.md). Its
+provisioning and deployment entry points are `provision-production-good-luck.ps1` and
+`deploy-production-good-luck.ps1`. They use an isolated named business database, queue, Scheduler,
+runtime/build/invoker identities and image repository, while sharing only the schema-2 production X
+authority with production Captain. Deployment always sets `X_POSTING_ENABLED=false`, pauses the
+production queue and Scheduler, and requires both to be empty/paused before succeeding.
+
 ## Teardown
 
 For teardown, first disable any Scheduler job, then remove the Cloud Run service, queue, image
