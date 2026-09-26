@@ -26,10 +26,10 @@ access is proven. Its identity has conditioned Datastore access only to `captain
 to the static OAuth client credentials. It has no `(default)`, `shared-x-oauth`, test token-secret,
 Compute, Windows-worker or Good Luck authority.
 
-`src/fpl_bot/production_x_identity.py` intentionally contains no configured user ID before human
-authorization. The production runtime and deployment script both refuse to start in that state.
-After read-only `/2/users/me` verifies the intended account, the numeric ID is committed as the
-source-level immutable destination guard and must exactly match the deployment environment.
+`src/fpl_bot/production_x_identity.py` contains the independently verified production numeric user
+ID `1249335464571650048`. It was established by the no-post authorization and read-only
+`/2/users/me` response on 2026-09-26. The production runtime and deployment script require the
+deployment environment to match this source-level immutable destination guard exactly.
 
 ## Human no-post authorization boundary
 
