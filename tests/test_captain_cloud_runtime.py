@@ -11,7 +11,6 @@ from fpl_bot.captain_compute import ProviderResult
 from fpl_bot.captain_controller import CaptainController, TaskConfirmation
 from fpl_bot.captain_http import DualPurposeWorkerService, WorkerControllerService
 from fpl_bot.captain_memory_repository import InMemoryCaptainRepository
-from fpl_bot.captain_release_diagnostics import ReleaseRejectionCode
 from fpl_bot.captain_serialization import from_document
 from fpl_bot.captain_state import GenerationStatus, PostKey, StateConflict, TaskKind
 from fpl_bot.captain_transport import parse_worker_assignment, worker_assignment_payload
@@ -291,12 +290,12 @@ def _dual_rehearsal(worker_offset_ms):
     return worker.run(), acquired, repo, gid, run_id
 
 
-def test_production_composition_rehearsal_uses_real_release_predicates_and_central_audit():
+def test_production_composition_rehearsal_accepts_cross_clock_release_without_posting():
     result, acquired, repo, gid, run_id = _dual_rehearsal(50)
-    assert result.status == WorkerStatus.RELEASE_REJECTED, result.release_rejection
-    assert result.release_rejection.code == ReleaseRejectionCode.ISSUED_IN_WORKER_FUTURE
-    assert repo.release_failure(run_id).diagnostic == result.release_rejection
-    assert acquired == []
+    assert result.status == WorkerStatus.ACQUISITION_FAILED, result.release_rejection
+    assert result.release_rejection is None
+    assert repo.release_failure(run_id) is None
+    assert acquired == [5]
     assert repo.candidate(gid) is None
     assert repo.posting(PostKey("1", 5)).attempts == ()
     assert repo.posting(PostKey(PRODUCTION_ID, 5)).attempts == ()

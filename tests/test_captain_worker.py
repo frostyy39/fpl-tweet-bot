@@ -193,10 +193,6 @@ def test_exact_release_boundaries(setup, offset, expected):
             lambda w, r: ReleaseGrant(w, r, T - timedelta(microseconds=1)),
             ReleaseRejectionCode.ISSUED_BEFORE_WINDOW,
         ),
-        (
-            lambda w, r: ReleaseGrant(w, r, T + timedelta(seconds=1)),
-            ReleaseRejectionCode.ISSUED_IN_WORKER_FUTURE,
-        ),
     ],
 )
 def test_stale_revoked_or_mismatched_release(setup, release, code):
@@ -299,20 +295,32 @@ def test_malformed_or_unavailable_release_keeps_original_fail_closed_status(setu
     assert not acquisition.calls and not client.submissions
 
 
-def test_slight_clock_skew_still_rejects_future_issued_at(setup):
+@pytest.mark.parametrize(
+    "worker_offset_ms,issued_offset_ms",
+    [
+        (0, 0),  # synchronized at exact T
+        (4100, 4150),  # worker slightly behind the controller
+        (4150, 4100),  # worker slightly ahead of the controller
+        (1000, 300000),  # substantial skew, with both clocks still inside [T,L]
+        (300000, 0),  # exact L on the worker and exact T on the controller
+    ],
+)
+def test_valid_release_does_not_require_cross_clock_ordering(
+    setup, worker_offset_ms, issued_offset_ms
+):
     worker, client, acquisition, clock = setup
-    clock.value = T + timedelta(seconds=4, milliseconds=100)
+    clock.value = T + timedelta(milliseconds=worker_offset_ms)
     client.release = lambda w, r: ReleaseGrant(
         w,
         r,
-        T + timedelta(seconds=4, milliseconds=150),
-        T + timedelta(seconds=4, milliseconds=180),
+        T + timedelta(milliseconds=issued_offset_ms),
+        T + timedelta(milliseconds=issued_offset_ms + 30),
     )
     result = worker.run()
-    assert result.status == WorkerStatus.RELEASE_REJECTED
-    assert result.release_rejection.code == ReleaseRejectionCode.ISSUED_IN_WORKER_FUTURE
-    assert result.release_rejection.issued_minus_worker_ms == 50
-    assert not acquisition.calls
+    assert result.status == WorkerStatus.SUCCEEDED
+    assert result.release_rejection is None
+    assert acquisition.calls == [WORK.assignment.event_id]
+    assert len(client.submissions) == 1
 
 
 @pytest.mark.parametrize(

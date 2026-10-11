@@ -396,7 +396,8 @@ class CaptainWorker:
                             reply.server_sent_at if isinstance(reply, ReleaseGrant) else None,
                         ),
                     )
-                # Keep the original validation order and policy unchanged.
+                # The controller has already claimed this run at its authoritative
+                # time. Do not compare its clock to the worker's independent clock.
                 if not timing.permits_new_attempt(now):
                     code = (
                         ReleaseRejectionCode.WORKER_BEFORE_WINDOW
@@ -409,8 +410,6 @@ class CaptainWorker:
                         if reply.issued_at < timing.target_utc
                         else ReleaseRejectionCode.ISSUED_AFTER_WINDOW
                     )
-                elif reply.issued_at > now:
-                    code = ReleaseRejectionCode.ISSUED_IN_WORKER_FUTURE
                 else:
                     code = None
                 if code is not None:
