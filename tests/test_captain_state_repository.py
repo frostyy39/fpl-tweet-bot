@@ -535,6 +535,7 @@ def test_state_modules_have_no_production_or_provider_imports():
         "threading",
         "fpl_bot.captain_handoff",
         "fpl_bot.captain_orchestration_timing",
+        "fpl_bot.captain_release_diagnostics",
         "fpl_bot.captain_state",
     }
     for name in ("captain_state", "captain_repository", "captain_memory_repository"):

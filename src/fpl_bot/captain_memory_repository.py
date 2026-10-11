@@ -19,6 +19,8 @@ from fpl_bot.captain_state import (
     PostingRecord,
     PostKey,
     RehearsalBinding,
+    ReleaseFailureRecord,
+    ReleaseRejectionDiagnostic,
     SessionHealthEvidence,
     StateConflict,
     TaskIntent,
@@ -67,6 +69,7 @@ class InMemoryCaptainRepository:
         self._vm: VmUseLease | None = None
         self._retired_vm: dict[UUID, VmUseLease] = {}
         self._health: dict[UUID, tuple[SessionHealthEvidence, ...]] = {}
+        self._release_failures: dict[UUID, ReleaseFailureRecord] = {}
 
     def _get(self, generation_id: UUID) -> Generation:
         try:
@@ -517,3 +520,49 @@ class InMemoryCaptainRepository:
     def session_health(self, generation_id: UUID) -> tuple[SessionHealthEvidence, ...]:
         self._get(generation_id)
         return self._health.get(generation_id, ())
+
+    @atomic
+    def record_release_failure(
+        self,
+        assignment: CaptainAssignment,
+        run_id: UUID,
+        status: str,
+        diagnostic: ReleaseRejectionDiagnostic,
+        now: datetime,
+    ) -> Mutation[ReleaseFailureRecord]:
+        require_utc(now)
+        identity(run_id)
+        if not isinstance(assignment, CaptainAssignment):
+            raise StateConflict("invalid release failure assignment")
+        generation = self._live(assignment.generation_id)
+        if generation.assignment != assignment:
+            raise StateConflict("release failure assignment mismatch")
+        claimed = self._generation_attempt.get(assignment.generation_id)
+        if claimed is not None and claimed != run_id:
+            raise StateConflict("release failure belongs to another run")
+        record = ReleaseFailureRecord(
+            run_id,
+            assignment.generation_id,
+            assignment.assignment_id,
+            status,
+            diagnostic,
+            now,
+        )
+        previous = self._release_failures.get(run_id)
+        if previous is not None:
+            if (
+                previous.generation_id != record.generation_id
+                or previous.assignment_id != record.assignment_id
+                or previous.status != record.status
+                or previous.diagnostic != record.diagnostic
+            ):
+                raise StateConflict("conflicting release failure report")
+            return Mutation(previous, False)
+        chronological(now, generation.history[0][1])
+        self._release_failures[run_id] = record
+        return Mutation(record, True)
+
+    @atomic
+    def release_failure(self, run_id: UUID) -> ReleaseFailureRecord | None:
+        identity(run_id)
+        return self._release_failures.get(run_id)

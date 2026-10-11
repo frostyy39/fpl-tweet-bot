@@ -11,6 +11,10 @@ from uuid import UUID
 
 from fpl_bot.captain_handoff import AuthenticationStatus, CaptainAssignment, ProjectionHandoff
 from fpl_bot.captain_orchestration_timing import require_utc
+from fpl_bot.captain_release_diagnostics import (
+    ReleaseRejectionCode,
+    ReleaseRejectionDiagnostic,
+)
 
 REHEARSAL_DESTINATION_USER_ID = "1"
 
@@ -114,6 +118,37 @@ class AcquisitionAttempt:
     status: AttemptStatus
     updated_at: datetime
     handoff: ProjectionHandoff | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseFailureRecord:
+    """Worker-reported evidence only; this record never grants any authority."""
+
+    run_id: UUID
+    generation_id: UUID
+    assignment_id: UUID
+    status: str
+    diagnostic: ReleaseRejectionDiagnostic
+    recorded_at: datetime
+
+    def __post_init__(self) -> None:
+        for value in (self.run_id, self.generation_id, self.assignment_id):
+            identity(value)
+        require_utc(self.recorded_at)
+        if not isinstance(self.diagnostic, ReleaseRejectionDiagnostic):
+            raise StateConflict("invalid release failure diagnostic")
+        transport_codes = {
+            ReleaseRejectionCode.MALFORMED_RESPONSE,
+            ReleaseRejectionCode.TRANSPORT_UNAVAILABLE,
+        }
+        if not (
+            self.status == "controller_unavailable"
+            and self.diagnostic.code in transport_codes
+            or self.status == "release_rejected"
+            and self.diagnostic.code not in transport_codes
+            and self.diagnostic.code != ReleaseRejectionCode.RUN_ID_REUSED
+        ):
+            raise StateConflict("release diagnostic/status mismatch")
 
 
 class PostingStatus(StrEnum):

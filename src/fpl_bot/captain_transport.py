@@ -15,6 +15,7 @@ from fpl_bot.captain_worker import (
     HandoffReceipt,
     ReceiptStatus,
     ReleaseGrant,
+    ReleaseRefusal,
     WorkerAssignment,
     WorkerStatus,
 )
@@ -156,7 +157,7 @@ class CaptainWorkerHttpClient:
 
     def await_release(self, work, run_id, *, timeout_seconds, cancelled):
         if cancelled():
-            return False
+            return ReleaseRefusal.CANCELLED_BEFORE_REQUEST
         status, data = self._call(
             "/captain/worker/release",
             {"run_id": str(run_id), "work": worker_assignment_payload(work)},
@@ -165,9 +166,16 @@ class CaptainWorkerHttpClient:
         if status == 202:
             return None
         if status == 410:
-            return False
+            return ReleaseRefusal.REVOKED
         issued = datetime.fromisoformat(data["issued_at"].replace("Z", "+00:00"))
-        return ReleaseGrant(parse_worker_assignment(data["work"]), UUID(data["run_id"]), issued)
+        server_sent = (
+            datetime.fromisoformat(data["server_sent_at"].replace("Z", "+00:00"))
+            if "server_sent_at" in data
+            else None  # Older controllers remain fail-closed, with unknown clock relation.
+        )
+        return ReleaseGrant(
+            parse_worker_assignment(data["work"]), UUID(data["run_id"]), issued, server_sent
+        )
 
     def submit_handoff(self, handoff, digest, health):
         status, data = self._call(
@@ -187,12 +195,15 @@ class CaptainWorkerHttpClient:
             ReceiptStatus(data["status"]),
         )
 
-    def report_failure(self, work, run_id, status):
+    def report_failure(self, work, run_id, status, release_rejection=None):
         self._call(
             "/captain/worker/failure",
             {
                 "run_id": str(run_id),
                 "status": WorkerStatus(status).value,
                 "work": worker_assignment_payload(work) if work else None,
+                "release_rejection": (
+                    release_rejection.to_payload() if release_rejection is not None else None
+                ),
             },
         )

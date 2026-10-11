@@ -24,6 +24,7 @@ from fpl_bot.captain_handoff import (
 )
 from fpl_bot.captain_memory_repository import InMemoryCaptainRepository
 from fpl_bot.captain_orchestration_timing import CaptainTiming
+from fpl_bot.captain_release_diagnostics import ReleaseRejectionCode, release_diagnostic
 from fpl_bot.captain_serialization import InvalidCaptainDocument, from_document, to_document
 from fpl_bot.captain_state import GenerationStatus as G
 from fpl_bot.captain_state import PostingStatus as P
@@ -208,6 +209,62 @@ def test_full_trace_matches_reference_and_restart():
         assert getattr(durable, name)(*args) == getattr(reference, name)(*args)
     assert all(n.startswith(PREFIX) for n in client.data)
     assert durable.posting(KEY).attempts[0].post_id == "987654321"
+
+
+def test_release_failure_transaction_and_restart_match_reference():
+    durable, _, client = adapters()
+    reference = InMemoryCaptainRepository()
+    run_id = UUID(int=977)
+    diagnostic = release_diagnostic(
+        ReleaseRejectionCode.ISSUED_IN_WORKER_FUTURE,
+        ASSIGNMENT.timing,
+        T,
+        T + timedelta(milliseconds=100),
+        T + timedelta(milliseconds=150),
+        T + timedelta(milliseconds=175),
+    )
+    for repo in (durable, reference):
+        repo.plan(KEY, ASSIGNMENT, None, T)
+        first = repo.record_release_failure(ASSIGNMENT, run_id, "release_rejected", diagnostic, T)
+        assert first.applied
+        assert not repo.record_release_failure(
+            ASSIGNMENT, run_id, "release_rejected", diagnostic, T + timedelta(seconds=1)
+        ).applied
+        with pytest.raises(StateConflict):
+            repo.record_release_failure(
+                ASSIGNMENT,
+                run_id,
+                "release_rejected",
+                replace(diagnostic, code=ReleaseRejectionCode.REVOKED),
+                T + timedelta(seconds=1),
+            )
+    durable, _, _ = adapters(client)
+    assert durable.release_failure(run_id) == reference.release_failure(run_id)
+    assert from_document(to_document(durable.release_failure(run_id))) == durable.release_failure(
+        run_id
+    )
+    assert any(name.startswith(PREFIX + "release_failures/") for name in client.data)
+    assert not durable.posting(KEY).attempts
+
+
+def test_concurrent_duplicate_release_failure_has_one_durable_record():
+    repo, _, client = adapters()
+    repo.plan(KEY, ASSIGNMENT, None, T)
+    run_id = UUID(int=978)
+    diagnostic = release_diagnostic(ReleaseRejectionCode.REVOKED, ASSIGNMENT.timing, T, T)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = tuple(
+            pool.map(
+                lambda _: (
+                    repo.record_release_failure(
+                        ASSIGNMENT, run_id, "release_rejected", diagnostic, T
+                    ).applied
+                ),
+                range(2),
+            )
+        )
+    assert sorted(results) == [False, True]
+    assert len([name for name in client.data if name.startswith(PREFIX + "release_failures/")]) == 1
 
 
 def test_roundtrip_all_durable_records():

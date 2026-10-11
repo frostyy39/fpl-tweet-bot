@@ -20,6 +20,11 @@ from fpl_bot.captain_handoff import (
     RowCounts,
 )
 from fpl_bot.captain_orchestration_timing import require_utc
+from fpl_bot.captain_release_diagnostics import (
+    ReleaseRejectionCode,
+    ReleaseRejectionDiagnostic,
+    release_diagnostic,
+)
 from fpl_bot.captain_session_health import SessionObservation, summarize_session
 from fpl_bot.captain_state import SessionHealthEvidence, identity
 from fpl_bot.errors import CaptainReviewBrowserError
@@ -47,12 +52,20 @@ class ReleaseGrant:
     work: WorkerAssignment
     run_id: UUID
     issued_at: datetime
+    server_sent_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.work, WorkerAssignment):
             raise ValueError("invalid release assignment")
         identity(self.run_id)
         require_utc(self.issued_at)
+        if self.server_sent_at is not None:
+            require_utc(self.server_sent_at)
+
+
+class ReleaseRefusal(StrEnum):
+    REVOKED = "revoked"
+    CANCELLED_BEFORE_REQUEST = "cancelled_before_request"
 
 
 class ReceiptStatus(StrEnum):
@@ -206,12 +219,16 @@ class ControllerClient(Protocol):
         *,
         timeout_seconds: float,
         cancelled: Callable[[], bool],
-    ) -> ReleaseGrant | None | bool: ...
+    ) -> ReleaseGrant | ReleaseRefusal | None | bool: ...
     def submit_handoff(
         self, handoff: ProjectionHandoff, digest: str, health: SessionHealthEvidence | None
     ) -> HandoffReceipt: ...
     def report_failure(
-        self, work: WorkerAssignment | None, run_id: UUID, status: WorkerStatus
+        self,
+        work: WorkerAssignment | None,
+        run_id: UUID,
+        status: WorkerStatus,
+        release_rejection: ReleaseRejectionDiagnostic | None = None,
     ) -> None: ...
 
 
@@ -237,6 +254,7 @@ class WorkerResult:
     handoff: ProjectionHandoff | None = None
     health: SessionHealthEvidence | None = None
     acquisition_failure: AcquisitionFailureDiagnostic | None = None
+    release_rejection: ReleaseRejectionDiagnostic | None = None
 
     @property
     def exit_code(self) -> int:
@@ -282,7 +300,12 @@ class CaptainWorker:
         run_id = self.new_run_id()
         identity(run_id)
         if run_id in self._used_runs:
-            return WorkerResult(WorkerStatus.RELEASE_REJECTED)
+            return WorkerResult(
+                WorkerStatus.RELEASE_REJECTED,
+                release_rejection=release_diagnostic(
+                    ReleaseRejectionCode.RUN_ID_REUSED, None, None, None
+                ),
+            )
         self._used_runs.add(run_id)
         work = None
 
@@ -291,10 +314,14 @@ class CaptainWorker:
             handoff=None,
             health=None,
             acquisition_failure: AcquisitionFailureDiagnostic | None = None,
+            release_rejection: ReleaseRejectionDiagnostic | None = None,
         ) -> WorkerResult:
             with suppress(Exception):  # Never log arbitrary transport/credential exceptions.
-                self.client.report_failure(work, run_id, status)
-            return WorkerResult(status, handoff, health, acquisition_failure)
+                if release_rejection is not None and work is not None:
+                    self.client.report_failure(work, run_id, status, release_rejection)
+                else:
+                    self.client.report_failure(work, run_id, status)
+            return WorkerResult(status, handoff, health, acquisition_failure, release_rejection)
 
         if self.current_user().casefold() != self.expected_user.casefold():
             return fail(WorkerStatus.IDENTITY_MISMATCH)
@@ -317,27 +344,87 @@ class CaptainWorker:
                 now = self._now()
                 if now > timing.expiry_utc:
                     return fail(WorkerStatus.EXPIRED)
-                reply = self.client.await_release(
-                    work,
-                    run_id,
-                    timeout_seconds=min(10.0, (timing.expiry_utc - now).total_seconds()),
-                    cancelled=self.cancelled,
-                )
+                request_started = now
+                try:
+                    reply = self.client.await_release(
+                        work,
+                        run_id,
+                        timeout_seconds=min(10.0, (timing.expiry_utc - now).total_seconds()),
+                        cancelled=self.cancelled,
+                    )
+                except Exception as error:
+                    code = (
+                        ReleaseRejectionCode.MALFORMED_RESPONSE
+                        if isinstance(error, (KeyError, TypeError, ValueError))
+                        or getattr(error, "category", None) == "controller_malformed_response"
+                        else ReleaseRejectionCode.TRANSPORT_UNAVAILABLE
+                    )
+                    return fail(
+                        WorkerStatus.CONTROLLER_UNAVAILABLE,
+                        release_rejection=release_diagnostic(
+                            code, timing, request_started, self._now()
+                        ),
+                    )
                 if reply is None:
                     continue
-                if (
-                    not isinstance(reply, ReleaseGrant)
-                    or reply.work != work
-                    or reply.run_id != run_id
-                ):
-                    return fail(WorkerStatus.RELEASE_REJECTED)
                 now = self._now()
-                if (
-                    not timing.permits_new_attempt(now)
-                    or not timing.permits_new_attempt(reply.issued_at)
-                    or reply.issued_at > now
-                ):
-                    return fail(WorkerStatus.RELEASE_REJECTED)
+                if reply is ReleaseRefusal.REVOKED:
+                    code = ReleaseRejectionCode.REVOKED
+                elif reply is ReleaseRefusal.CANCELLED_BEFORE_REQUEST:
+                    code = ReleaseRejectionCode.CANCELLED_BEFORE_REQUEST
+                elif not isinstance(reply, ReleaseGrant):
+                    code = (
+                        ReleaseRejectionCode.UNTYPED_REFUSAL
+                        if reply is False
+                        else ReleaseRejectionCode.INVALID_REPLY_TYPE
+                    )
+                elif reply.work != work:
+                    code = ReleaseRejectionCode.ASSIGNMENT_MISMATCH
+                elif reply.run_id != run_id:
+                    code = ReleaseRejectionCode.RUN_ID_MISMATCH
+                else:
+                    code = None
+                if code is not None:
+                    return fail(
+                        WorkerStatus.RELEASE_REJECTED,
+                        release_rejection=release_diagnostic(
+                            code,
+                            timing,
+                            request_started,
+                            now,
+                            reply.issued_at if isinstance(reply, ReleaseGrant) else None,
+                            reply.server_sent_at if isinstance(reply, ReleaseGrant) else None,
+                        ),
+                    )
+                # Keep the original validation order and policy unchanged.
+                if not timing.permits_new_attempt(now):
+                    code = (
+                        ReleaseRejectionCode.WORKER_BEFORE_WINDOW
+                        if now < timing.target_utc
+                        else ReleaseRejectionCode.WORKER_AFTER_WINDOW
+                    )
+                elif not timing.permits_new_attempt(reply.issued_at):
+                    code = (
+                        ReleaseRejectionCode.ISSUED_BEFORE_WINDOW
+                        if reply.issued_at < timing.target_utc
+                        else ReleaseRejectionCode.ISSUED_AFTER_WINDOW
+                    )
+                elif reply.issued_at > now:
+                    code = ReleaseRejectionCode.ISSUED_IN_WORKER_FUTURE
+                else:
+                    code = None
+                if code is not None:
+                    return fail(
+                        WorkerStatus.RELEASE_REJECTED,
+                        release_rejection=release_diagnostic(
+                            code,
+                            timing,
+                            request_started,
+                            now,
+                            reply.issued_at,
+                            reply.server_sent_at,
+                        ),
+                    )
                 break
             else:
                 return fail(WorkerStatus.WAIT_EXHAUSTED)

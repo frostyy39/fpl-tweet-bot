@@ -135,7 +135,8 @@ $archive = [IO.Compression.ZipFile]::OpenRead((Resolve-Path -LiteralPath $Bundle
 try {
     $requiredModules = @(
         '__init__','captain_browser_runtime','captain_handoff','captain_models',
-        'captain_orchestration_timing','captain_result_directory','captain_review_browser',
+        'captain_orchestration_timing','captain_release_diagnostics',
+        'captain_result_directory','captain_review_browser',
         'captain_serialization','captain_session_health','captain_state','captain_timing',
         'captain_transport','captain_vm_operations','captain_worker','captain_worker_browser',
         'captain_worker_cli','errors','events','models')

@@ -16,7 +16,7 @@ from fpl_bot.captain_transport import (
     parse_worker_assignment,
     worker_assignment_payload,
 )
-from fpl_bot.captain_worker import WorkerAssignment
+from fpl_bot.captain_worker import ReleaseRefusal, WorkerAssignment
 
 T = datetime(2026, 9, 18, 15, 30, tzinfo=UTC)
 WORK = WorkerAssignment(
@@ -67,6 +67,39 @@ def test_worker_assignment_codec_is_strict_and_preserves_identity():
     malformed["extra"] = True
     with pytest.raises(ValueError):
         parse_worker_assignment(malformed)
+
+
+def test_release_response_adds_server_clock_evidence_without_changing_grant_identity():
+    payload = {
+        "work": worker_assignment_payload(WORK),
+        "run_id": str(WORK.attempt_id),
+        "issued_at": T.isoformat(),
+        "server_sent_at": (T + timedelta(milliseconds=90)).isoformat(),
+    }
+    opener = Opener(Response(json.dumps(payload).encode()))
+    client = CaptainWorkerHttpClient(
+        "https://captain.example.run.app", "https://captain.example.run.app", Tokens(), opener
+    )
+    grant = client.await_release(WORK, WORK.attempt_id, timeout_seconds=10, cancelled=lambda: False)
+    assert grant.work == WORK and grant.run_id == WORK.attempt_id
+    assert grant.server_sent_at == T + timedelta(milliseconds=90)
+    payload.pop("server_sent_at")
+    opener.response = Response(json.dumps(payload).encode())
+    assert (
+        client.await_release(
+            WORK, WORK.attempt_id, timeout_seconds=10, cancelled=lambda: False
+        ).server_sent_at
+        is None
+    )
+    opener.response = HTTPError("https://captain.example", 410, "stale", {}, BytesIO())
+    assert (
+        client.await_release(WORK, WORK.attempt_id, timeout_seconds=10, cancelled=lambda: False)
+        is ReleaseRefusal.REVOKED
+    )
+    assert (
+        client.await_release(WORK, WORK.attempt_id, timeout_seconds=10, cancelled=lambda: True)
+        is ReleaseRefusal.CANCELLED_BEFORE_REQUEST
+    )
 
 
 class Tokens:

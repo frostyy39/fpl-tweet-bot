@@ -15,6 +15,7 @@ from fpl_bot.captain_state import (
     PostingRecord,
     PostKey,
     RehearsalBinding,
+    ReleaseFailureRecord,
     SessionHealthEvidence,
     TaskIntent,
     TaskKind,
@@ -39,6 +40,7 @@ SPECS = {
     "claim_index": (UUID, PostKey),
     "vm": (str, (VmUseLease, type(None))),
     "operations": (tuple, VmOperation),
+    "release_failures": (UUID, ReleaseFailureRecord),
 }
 
 
@@ -76,6 +78,7 @@ def _validate_entry(name, key, value):
         "candidates": lambda: value.generation_id,
         "rehearsals": lambda: value.generation_id,
         "retired_vm": lambda: value.lease_id,
+        "release_failures": lambda: value.run_id,
     }
     if name in bindings and bindings[name]() != key:
         raise InvalidCaptainDocument("record identity mismatch")
@@ -206,6 +209,7 @@ class _Unit:
             "intents",
             "retired_vm",
             "health",
+            "release_failures",
         ):
             setattr(repo, "_" + name, self.maps[name])
         if method in {"plan", "plan_rehearsal"}:
@@ -344,6 +348,8 @@ for _name in (
     "complete_cleanup",
     "record_session_health",
     "session_health",
+    "record_release_failure",
+    "release_failure",
 ):
     setattr(FirestoreCaptainRepository, _name, _forward(InMemoryCaptainRepository, _name))
 for _name in (

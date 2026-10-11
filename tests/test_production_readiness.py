@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -48,7 +48,12 @@ DEADLINE = datetime(2026, 10, 10, 10, tzinfo=UTC)
 
 
 def test_fresh_target_derives_exact_captain_and_good_luck_boundaries():
-    target = verify_production_target(Source(), expected_event_id=6, expected_deadline_utc=DEADLINE)
+    target = verify_production_target(
+        Source(),
+        expected_event_id=6,
+        expected_deadline_utc=DEADLINE,
+        now=DEADLINE - timedelta(days=1),
+    )
     assert target.payload() == {
         "event_id": 6,
         "event_code": "GW6",
@@ -68,7 +73,12 @@ def test_fresh_target_derives_exact_captain_and_good_luck_boundaries():
 )
 def test_fresh_target_rejects_changed_event_or_deadline(source, event_id, deadline):
     with pytest.raises(ProductionTargetMismatch):
-        verify_production_target(source, expected_event_id=event_id, expected_deadline_utc=deadline)
+        verify_production_target(
+            source,
+            expected_event_id=event_id,
+            expected_deadline_utc=deadline,
+            now=DEADLINE - timedelta(days=1),
+        )
 
 
 def test_cli_fails_closed_before_fetch_for_invalid_deadline(capsys):

@@ -10,6 +10,7 @@ from fpl_bot.captain_controller import CaptainController
 from fpl_bot.captain_handoff import ProjectionHandoff
 from fpl_bot.captain_orchestration_timing import require_utc, utc_text
 from fpl_bot.captain_publication_tasks import instruction_for_candidate
+from fpl_bot.captain_release_diagnostics import ReleaseRejectionDiagnostic
 from fpl_bot.captain_serialization import from_document
 from fpl_bot.captain_state import GenerationStatus, PostKey, StateConflict, TaskKind
 from fpl_bot.captain_task_handlers import decode_task_payload
@@ -173,7 +174,13 @@ class WorkerControllerService:
             ReceiptStatus.ACCEPTED if mutation.applied else ReceiptStatus.REPLAY,
         )
 
-    def failure(self, work, run_id, status):
+    def failure(self, work, run_id, status, release_rejection=None):
+        if release_rejection is not None and (
+            not isinstance(release_rejection, ReleaseRejectionDiagnostic)
+            or status not in {WorkerStatus.RELEASE_REJECTED, WorkerStatus.CONTROLLER_UNAVAILABLE}
+            or work is None
+        ):
+            raise StateConflict("invalid worker release diagnostic")
         if work is None:
             return
         if work.attempt_id != run_id:
@@ -183,6 +190,14 @@ class WorkerControllerService:
         )
         if generation is None or generation.assignment != work.assignment:
             return
+        if release_rejection is not None:
+            self.repository.record_release_failure(
+                work.assignment,
+                run_id,
+                status.value,
+                release_rejection,
+                self._now(),
+            )
         target = {
             WorkerStatus.AUTHENTICATION_REQUIRED: GenerationStatus.AUTHENTICATION_REQUIRED,
             WorkerStatus.ACQUISITION_FAILED: GenerationStatus.FAILED,
@@ -256,6 +271,7 @@ def create_captain_app(
                 "work": worker_assignment_payload(grant.work),
                 "run_id": str(grant.run_id),
                 "issued_at": utc_text(grant.issued_at),
+                "server_sent_at": utc_text(service._now()),
             }
         )
 
@@ -280,10 +296,17 @@ def create_captain_app(
     def failure():
         authorize_worker()
         data = request.get_json(force=True)
+        if type(data) is not dict or set(data) not in (
+            {"work", "run_id", "status"},
+            {"work", "run_id", "status", "release_rejection"},
+        ):
+            raise ValueError("invalid worker failure envelope")
+        diagnostic = data.get("release_rejection")
         service.failure(
             parse_worker_assignment(data["work"]) if data["work"] else None,
             UUID(data["run_id"]),
             WorkerStatus(data["status"]),
+            ReleaseRejectionDiagnostic.from_payload(diagnostic) if diagnostic is not None else None,
         )
         return jsonify({"status": "recorded"})
 

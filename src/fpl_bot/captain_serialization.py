@@ -20,6 +20,12 @@ from fpl_bot.captain_handoff import (
     RowCounts,
 )
 from fpl_bot.captain_orchestration_timing import CaptainTiming, utc_text
+from fpl_bot.captain_release_diagnostics import (
+    ClockRelation,
+    ReleaseRejectionCode,
+    ReleaseRejectionDiagnostic,
+    WindowPosition,
+)
 from fpl_bot.captain_state import (
     AcquisitionAttempt,
     AttemptStatus,
@@ -33,6 +39,7 @@ from fpl_bot.captain_state import (
     PostKey,
     RefreshObservation,
     RehearsalBinding,
+    ReleaseFailureRecord,
     SessionExpiryKind,
     SessionHealthEvidence,
     StateConflict,
@@ -61,6 +68,8 @@ RECORDS = {
         PostKey,
         Generation,
         RehearsalBinding,
+        ReleaseFailureRecord,
+        ReleaseRejectionDiagnostic,
         AcquisitionAttempt,
         PostingAttempt,
         PostingRecord,
@@ -90,6 +99,9 @@ ENUMS = {
         OperationPhase,
         DispatchStatus,
         VmAction,
+        ReleaseRejectionCode,
+        WindowPosition,
+        ClockRelation,
     )
 }
 

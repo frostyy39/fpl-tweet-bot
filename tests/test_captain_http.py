@@ -26,6 +26,7 @@ from fpl_bot.captain_http import (
 from fpl_bot.captain_memory_repository import InMemoryCaptainRepository
 from fpl_bot.captain_orchestration_timing import CaptainTiming
 from fpl_bot.captain_publication import PublicationInstruction
+from fpl_bot.captain_release_diagnostics import ReleaseRejectionCode, release_diagnostic
 from fpl_bot.captain_state import GenerationStatus, PostKey, StateConflict, TaskKind
 from fpl_bot.captain_vm_operations import InMemoryVmOperations
 from fpl_bot.captain_worker import ReleaseGrant, WorkerAssignment
@@ -118,6 +119,94 @@ def test_unauthorized_worker_is_rejected_before_repository_read():
     assert response.status_code == 403 and response.json == {"error": "unauthorized"}
 
 
+def test_authenticated_release_failure_is_immutable_central_evidence_only():
+    _, service, authorizer, app, generation, clock = setup()
+    timing = generation.assignment.timing
+    clock.value = timing.target_utc + timedelta(seconds=1)
+    run_id = UUID(int=900)
+    work = WorkerAssignment(1, generation.assignment, run_id)
+    diagnostic = release_diagnostic(
+        ReleaseRejectionCode.ISSUED_IN_WORKER_FUTURE,
+        timing,
+        clock.value - timedelta(milliseconds=200),
+        clock.value,
+        clock.value + timedelta(milliseconds=50),
+        clock.value + timedelta(milliseconds=75),
+    )
+    payload = {
+        "work": {
+            "schema_version": 1,
+            "assignment": work.assignment.to_payload(),
+            "attempt_id": str(run_id),
+            "next_target": None,
+        },
+        "run_id": str(run_id),
+        "status": "release_rejected",
+        "release_rejection": diagnostic.to_payload(),
+    }
+    headers = {"Authorization": "Bearer opaque"}
+    authorizer.allowed = False
+    assert (
+        app.test_client().post("/captain/worker/failure", json=payload, headers=headers).status_code
+        == 403
+    )
+    assert service.repository.release_failure(run_id) is None
+    authorizer.allowed = True
+    first = app.test_client().post("/captain/worker/failure", json=payload, headers=headers)
+    assert first.status_code == 200
+    stored = service.repository.release_failure(run_id)
+    assert stored.diagnostic == diagnostic and stored.status == "release_rejected"
+    assert not service.repository.record_release_failure(
+        work.assignment, run_id, "release_rejected", diagnostic, clock.value
+    ).applied
+    assert (
+        app.test_client().post("/captain/worker/failure", json=payload, headers=headers).status_code
+        == 200
+    )
+    assert service.repository.release_failure(run_id) == stored
+    stale = deepcopy(payload)
+    stale["run_id"] = str(UUID(int=901))
+    stale["work"]["attempt_id"] = stale["run_id"]
+    stale["work"]["assignment"]["generation_id"] = str(UUID(int=902))
+    assert (
+        app.test_client().post("/captain/worker/failure", json=stale, headers=headers).status_code
+        == 200
+    )
+    assert service.repository.release_failure(UUID(int=901)) is None
+    assert (
+        service.repository.generation(generation.assignment.generation_id).status
+        == GenerationStatus.WARMING
+    )
+    assert not service.repository.posting(generation.key).attempts
+    assert service.repository.candidate(generation.assignment.generation_id) is None
+
+    malformed = deepcopy(payload)
+    malformed["release_rejection"]["cookie"] = "SECRET"
+    assert (
+        app.test_client()
+        .post("/captain/worker/failure", json=malformed, headers=headers)
+        .status_code
+        == 409
+    )
+    malicious = deepcopy(payload)
+    malicious["status"] = "acquisition_failed"
+    assert (
+        app.test_client()
+        .post("/captain/worker/failure", json=malicious, headers=headers)
+        .status_code
+        == 409
+    )
+    conflict = deepcopy(payload)
+    conflict["release_rejection"]["code"] = ReleaseRejectionCode.REVOKED.value
+    assert (
+        app.test_client()
+        .post("/captain/worker/failure", json=conflict, headers=headers)
+        .status_code
+        == 409
+    )
+    assert service.repository.release_failure(run_id) == stored
+
+
 def test_authenticated_assignment_and_release_identity_and_time_are_enforced():
     _, service, _, app, generation, clock = setup()
     headers = {"Authorization": "Bearer opaque"}
@@ -136,6 +225,40 @@ def test_authenticated_assignment_and_release_identity_and_time_are_enforced():
         "/captain/worker/release", json={"run_id": str(UUID(int=9)), "work": work}, headers=headers
     )
     assert mismatch.status_code == 409
+
+
+def test_release_http_grant_includes_server_timestamp_without_changing_claim():
+    _, service, _, app, generation, clock = setup()
+    gid = generation.assignment.generation_id
+    timing = generation.assignment.timing
+    clock.value = timing.target_utc
+    service.repository.transition(
+        gid, GenerationStatus.WARMING, GenerationStatus.READY, clock.value
+    )
+    service.repository.transition(
+        gid, GenerationStatus.READY, GenerationStatus.RELEASED, clock.value
+    )
+    run_id = UUID(int=980)
+    work = WorkerAssignment(1, generation.assignment, run_id)
+    payload = {
+        "work": {
+            "schema_version": 1,
+            "assignment": work.assignment.to_payload(),
+            "attempt_id": str(run_id),
+            "next_target": None,
+        },
+        "run_id": str(run_id),
+    }
+    response = app.test_client().post(
+        "/captain/worker/release",
+        json=payload,
+        headers={"Authorization": "Bearer opaque"},
+    )
+    assert response.status_code == 200
+    assert response.json["issued_at"] == response.json["server_sent_at"]
+    assert response.json["run_id"] == str(run_id)
+    assert response.json["work"] == payload["work"]
+    assert service.repository.generation_acquisition(gid).attempt_id == run_id
 
 
 def test_rehearsal_assignment_release_and_handoff_require_fresh_official_binding():

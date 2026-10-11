@@ -94,7 +94,7 @@ def main(argv=None):
             cancelled=stop.is_set,
         ).run()
         audit = {
-            "schema_version": 2,
+            "schema_version": 3,
             "no_post": True,
             "worker_build_id": _worker_build_id(args.config),
             "started_at_utc": started.isoformat(),
@@ -105,6 +105,9 @@ def main(argv=None):
             "payload_digest": result.handoff.payload_digest if result.handoff else None,
             "acquisition_failure": (
                 result.acquisition_failure.to_payload() if result.acquisition_failure else None
+            ),
+            "release_rejection": (
+                result.release_rejection.to_payload() if result.release_rejection else None
             ),
         }
         with (output / "audit.json").open("x", encoding="utf-8", newline="\n") as stream:

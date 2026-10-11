@@ -16,6 +16,7 @@ from fpl_bot.captain_handoff import (
     RowCounts,
 )
 from fpl_bot.captain_orchestration_timing import CaptainTiming
+from fpl_bot.captain_release_diagnostics import ReleaseRejectionCode
 from fpl_bot.captain_session_health import SessionObservation, summarize_session
 from fpl_bot.captain_state import RefreshObservation, SessionExpiryKind
 from fpl_bot.captain_worker import (
@@ -28,6 +29,7 @@ from fpl_bot.captain_worker import (
     HandoffReceipt,
     ReceiptStatus,
     ReleaseGrant,
+    ReleaseRefusal,
     WorkerAssignment,
     WorkerStatus,
 )
@@ -79,6 +81,7 @@ class Client:
         self.polls = 0
         self.submissions = []
         self.failures = []
+        self.reported_diagnostics = []
         self.receipt_status = ReceiptStatus.ACCEPTED
         self.error = None
 
@@ -98,8 +101,9 @@ class Client:
             handoff.assignment.generation_id, handoff.attempt_id, digest, self.receipt_status
         )
 
-    def report_failure(self, work, run_id, status):
+    def report_failure(self, work, run_id, status, release_rejection=None):
         self.failures.append(status)
+        self.reported_diagnostics.append(release_rejection)
 
 
 @pytest.fixture
@@ -165,22 +169,43 @@ def test_exact_release_boundaries(setup, offset, expected):
 
 
 @pytest.mark.parametrize(
-    "release",
+    "release,code",
     [
-        lambda w, r: False,
-        lambda w, r: ReleaseGrant(replace(w, attempt_id=UUID(int=20)), r, T),
-        lambda w, r: ReleaseGrant(
-            replace(w, assignment=replace(w.assignment, generation_id=UUID(int=20))), r, T
+        (lambda w, r: False, ReleaseRejectionCode.UNTYPED_REFUSAL),
+        (lambda w, r: ReleaseRefusal.REVOKED, ReleaseRejectionCode.REVOKED),
+        (
+            lambda w, r: ReleaseRefusal.CANCELLED_BEFORE_REQUEST,
+            ReleaseRejectionCode.CANCELLED_BEFORE_REQUEST,
         ),
-        lambda w, r: ReleaseGrant(w, UUID(int=20), T),
-        lambda w, r: ReleaseGrant(w, r, T - timedelta(microseconds=1)),
-        lambda w, r: ReleaseGrant(w, r, T + timedelta(seconds=1)),
+        (lambda w, r: {}, ReleaseRejectionCode.INVALID_REPLY_TYPE),
+        (
+            lambda w, r: ReleaseGrant(replace(w, attempt_id=UUID(int=20)), r, T),
+            ReleaseRejectionCode.ASSIGNMENT_MISMATCH,
+        ),
+        (
+            lambda w, r: ReleaseGrant(
+                replace(w, assignment=replace(w.assignment, generation_id=UUID(int=20))), r, T
+            ),
+            ReleaseRejectionCode.ASSIGNMENT_MISMATCH,
+        ),
+        (lambda w, r: ReleaseGrant(w, UUID(int=20), T), ReleaseRejectionCode.RUN_ID_MISMATCH),
+        (
+            lambda w, r: ReleaseGrant(w, r, T - timedelta(microseconds=1)),
+            ReleaseRejectionCode.ISSUED_BEFORE_WINDOW,
+        ),
+        (
+            lambda w, r: ReleaseGrant(w, r, T + timedelta(seconds=1)),
+            ReleaseRejectionCode.ISSUED_IN_WORKER_FUTURE,
+        ),
     ],
 )
-def test_stale_revoked_or_mismatched_release(setup, release):
+def test_stale_revoked_or_mismatched_release(setup, release, code):
     worker, client, acquisition, _ = setup
     client.release = release
-    assert worker.run().status == WorkerStatus.RELEASE_REJECTED
+    result = worker.run()
+    assert result.status == WorkerStatus.RELEASE_REJECTED
+    assert result.release_rejection.code == code
+    assert client.reported_diagnostics[-1] == result.release_rejection
     assert not acquisition.calls and not client.submissions
 
 
@@ -225,8 +250,69 @@ def test_success_full_structured_handoff_and_no_repeat(setup):
     assert handoff.counts == DATA.counts
     assert health is None
     assert "tweet" not in handoff.to_payload()
-    assert worker.run().status == WorkerStatus.RELEASE_REJECTED
+    repeated = worker.run()
+    assert repeated.status == WorkerStatus.RELEASE_REJECTED
+    assert repeated.release_rejection.code == ReleaseRejectionCode.RUN_ID_REUSED
     assert len(acquisition.calls) == len(client.submissions) == 1
+
+
+@pytest.mark.parametrize(
+    "scenario,expected",
+    [
+        ("worker_before", ReleaseRejectionCode.WORKER_BEFORE_WINDOW),
+        ("worker_after", ReleaseRejectionCode.WORKER_AFTER_WINDOW),
+        ("issued_after", ReleaseRejectionCode.ISSUED_AFTER_WINDOW),
+    ],
+)
+def test_release_rejection_codes_for_each_window_predicate(setup, scenario, expected):
+    worker, client, acquisition, clock = setup
+    if scenario == "worker_before":
+        clock.value = T - timedelta(milliseconds=1)
+        client.release = lambda w, r: ReleaseGrant(w, r, T)
+    elif scenario == "worker_after":
+
+        def late_local(work, run):
+            clock.value = T + timedelta(minutes=5, milliseconds=1)
+            return ReleaseGrant(work, run, T)
+
+        client.release = late_local
+    else:
+        client.release = lambda w, r: ReleaseGrant(w, r, T + timedelta(minutes=5, seconds=1))
+    assert worker.run().release_rejection.code == expected
+    assert not acquisition.calls
+
+
+@pytest.mark.parametrize(
+    "error,code",
+    [
+        (ValueError("TOKEN_COOKIE_SECRET"), ReleaseRejectionCode.MALFORMED_RESPONSE),
+        (RuntimeError("TOKEN_COOKIE_SECRET"), ReleaseRejectionCode.TRANSPORT_UNAVAILABLE),
+    ],
+)
+def test_malformed_or_unavailable_release_keeps_original_fail_closed_status(setup, error, code):
+    worker, client, acquisition, _ = setup
+    client.release = lambda _work, _run: (_ for _ in ()).throw(error)
+    result = worker.run()
+    assert result.status == WorkerStatus.CONTROLLER_UNAVAILABLE
+    assert result.release_rejection.code == code
+    assert "TOKEN_COOKIE_SECRET" not in str(result.release_rejection.to_payload())
+    assert not acquisition.calls and not client.submissions
+
+
+def test_slight_clock_skew_still_rejects_future_issued_at(setup):
+    worker, client, acquisition, clock = setup
+    clock.value = T + timedelta(seconds=4, milliseconds=100)
+    client.release = lambda w, r: ReleaseGrant(
+        w,
+        r,
+        T + timedelta(seconds=4, milliseconds=150),
+        T + timedelta(seconds=4, milliseconds=180),
+    )
+    result = worker.run()
+    assert result.status == WorkerStatus.RELEASE_REJECTED
+    assert result.release_rejection.code == ReleaseRejectionCode.ISSUED_IN_WORKER_FUTURE
+    assert result.release_rejection.issued_minus_worker_ms == 50
+    assert not acquisition.calls
 
 
 @pytest.mark.parametrize(
