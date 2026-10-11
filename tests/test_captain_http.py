@@ -472,6 +472,71 @@ def test_publish_handler_routes_only_persisted_candidate_identity(monkeypatch):
     assert response.json["publication_identity"] == "captain-x-generation"
 
 
+def test_publish_handler_validates_rehearsal_without_routing_to_publisher():
+    controller, service, authorizer, _, generation, _ = setup()
+    controller.deliver = lambda envelope: SimpleNamespace(status="publish_eligible_no_write")
+    controller.repository.generation_acquisition = lambda generation_id: SimpleNamespace(
+        handoff=object()
+    )
+    controller.repository.candidate = lambda generation_id: SimpleNamespace(
+        validated_at_utc=generation.assignment.timing.target_utc
+    )
+    controller.repository.rehearsal = lambda generation_id: SimpleNamespace(
+        purpose="non_postable_rehearsal"
+    )
+
+    class Validator:
+        def validate(self, key, received):
+            return SimpleNamespace(
+                key=key,
+                assignment=generation.assignment,
+                weighted_length=204,
+            )
+
+    class Router:
+        destination_user_id = generation.key.destination_user_id
+
+        def ensure(self, *_):
+            pytest.fail("diagnostic candidate reached production publisher")
+
+    auth = CaptainAuthConfig(
+        "https://captain.invalid/worker",
+        "https://captain.invalid/tasks",
+        "worker@captain.invalid",
+        "tasks@captain.invalid",
+    )
+    app = create_captain_app(
+        service,
+        controller,
+        authorizer,
+        auth,
+        candidate_validator=Validator(),
+        publication_router=Router(),
+    )
+    envelope = TaskEnvelope(
+        generation.key.destination_user_id,
+        generation.assignment,
+        TaskKind.PUBLISH,
+        generation.assignment.timing.target_utc,
+    )
+    response = app.test_client().post(
+        "/captain/tasks/publish",
+        json={
+            "version": 1,
+            "identity": envelope.identity,
+            "digest": envelope.digest,
+            "destination_user_id": envelope.destination_user_id,
+            "assignment": envelope.assignment.to_payload(),
+            "kind": envelope.kind.value,
+            "scheduled_at": envelope.scheduled_at.isoformat().replace("+00:00", "Z"),
+        },
+        headers={"Authorization": "Bearer opaque"},
+    )
+    assert response.status_code == 200
+    assert response.json["status"] == "validated_non_postable_rehearsal"
+    assert controller.repository.posting(generation.key).attempts == ()
+
+
 def release_setup():
     controller, service, _, _, generation, clock = setup()
     clock.value = generation.assignment.timing.target_utc

@@ -28,6 +28,7 @@ class ProductionCaptainControllerConfig:
     destination_user_id: str
     publisher_origin: str
     publisher_invoker_email: str
+    nonpost_rehearsal_enabled: bool = False
 
     def __post_init__(self) -> None:
         expected_project = "fpl-frosty-bot-v1"
@@ -57,6 +58,8 @@ class ProductionCaptainControllerConfig:
             raise ValueError("production publisher invoker identity is fixed")
         if any(urlsplit(value).path for value in (self.origin, self.publisher_origin)):
             raise ValueError("controller and publisher origins cannot contain routes")
+        if type(self.nonpost_rehearsal_enabled) is not bool:
+            raise ValueError("non-postable rehearsal switch must be boolean")
 
     @classmethod
     def environment(cls, environ=None) -> "ProductionCaptainControllerConfig":
@@ -73,7 +76,10 @@ class ProductionCaptainControllerConfig:
             "PUBLISHER_INVOKER_EMAIL",
         )
         try:
-            return cls(*(source["CAPTAIN_" + name] for name in names))
+            mode = source.get("CAPTAIN_NONPOST_REHEARSAL_ENABLED", "false")
+            if mode not in {"true", "false"}:
+                raise ValueError("invalid non-postable rehearsal switch")
+            return cls(*(source["CAPTAIN_" + name] for name in names), mode == "true")
         except KeyError as exc:
             raise ValueError("production Captain controller configuration is incomplete") from exc
 
@@ -121,4 +127,5 @@ def create_app():
         provider,
         GoogleOidcAuthorizer(default_google_token_verifier),
         publisher_router=publication_router,
+        rehearsal_enabled=config.nonpost_rehearsal_enabled,
     )

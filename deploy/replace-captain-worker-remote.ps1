@@ -57,6 +57,24 @@ function Assert-SameHashes($Expected, $Actual, $Description = 'Audit preservatio
     }
 }
 
+function Preserve-VersionedRollback($Rollback, $Archive, $ExpectedHashes) {
+    if (Test-Path -LiteralPath $Archive) {
+        throw 'Versioned rollback archive target occupied; no replacement performed'
+    }
+    Rename-Item -LiteralPath $Rollback -NewName (Split-Path $Archive -Leaf)
+    Assert-SameHashes $ExpectedHashes (Get-TreeHashes $Archive) `
+        'Versioned rollback preservation'
+}
+
+function Assert-WorkerArchiveContent($Directory) {
+    foreach ($item in @(Get-ChildItem -LiteralPath $Directory -Recurse -Force)) {
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+            ($item.PSIsContainer -and $item.Name -eq 'FPLReviewCaptainProfile')) {
+            throw 'Rollback contains redirected or browser-profile content; no replacement performed'
+        }
+    }
+}
+
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
 if ($identity.Name.Split('\')[-1] -ne 'captaintrial') {
     throw 'Run only as the existing captaintrial user'
@@ -91,10 +109,6 @@ if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
 }
 if (Test-Path -LiteralPath $staging) {
     throw 'Staging target already exists; inspect it before retrying'
-}
-if ((Test-Path -LiteralPath $rollback) -and
-    (Test-Path -LiteralPath $legacyRollbackArchive)) {
-    throw 'Both rollback generations exist; inspect them before retrying'
 }
 if (@(Get-Process chrome -ErrorAction SilentlyContinue).Count -ne 0) {
     throw 'Chrome is running; close it normally before replacement'
@@ -158,6 +172,93 @@ try {
     }
 } finally {
     $archive.Dispose()
+}
+
+$versionedRollbackPreserved = $false
+$versionedRollbackPath = $null
+$versionedRollbackBuild = $null
+$existingArchives = @(Get-ChildItem -LiteralPath $parent -Directory |
+    Where-Object Name -like 'CaptainCloudWorker01.rollback-versioned-*')
+if ($existingArchives.Count -gt 1) {
+    throw 'Multiple versioned rollback archives require operator review'
+}
+if (Test-Path -LiteralPath $rollback) {
+    if (-not (Test-Path -LiteralPath $rollback -PathType Container) -or
+        ((Get-Item -LiteralPath $rollback -Force).Attributes -band
+            [IO.FileAttributes]::ReparsePoint)) {
+        throw 'Existing rollback is not a private directory; no replacement performed'
+    }
+    $rollbackManifest = Join-Path $rollback 'worker-build.json'
+    if (Test-Path -LiteralPath $rollbackManifest -PathType Leaf) {
+        if ($existingArchives.Count -ne 0) {
+            throw 'Versioned rollback archive already occupied; no replacement performed'
+        }
+        $rollbackBuild = Get-Content -LiteralPath $rollbackManifest -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+        if ($rollbackBuild.schema_version -ne 1 -or
+            $rollbackBuild.commit -notmatch '^[0-9a-f]{40}$' -or
+            $rollbackBuild.commit -eq $oldBuild) {
+            throw 'Versioned rollback identity invalid; no replacement performed'
+        }
+        $versionedRollbackBuild = [string]$rollbackBuild.commit
+        $versionedRollbackPath = Join-Path $parent `
+            "CaptainCloudWorker01.rollback-versioned-$versionedRollbackBuild"
+        if (Test-Path -LiteralPath $versionedRollbackPath) {
+            throw 'Versioned rollback archive target occupied; no replacement performed'
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $rollback 'fpl_bot\captain_worker_cli.py') `
+                -PathType Leaf) -or
+            (Test-Path -LiteralPath (Join-Path $rollback 'FPLReviewCaptainProfile'))) {
+            throw 'Versioned rollback structure invalid; no replacement performed'
+        }
+        Assert-WorkerArchiveContent $rollback
+        Read-WorkerConfig (Join-Path $rollback 'worker-config.json') $root $profile |
+            Out-Null
+        $rollbackAcl = Get-Acl -LiteralPath $rollback
+        if (-not $rollbackAcl.AreAccessRulesProtected -or
+            $rollbackAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value `
+                -ne $identity.User.Value) {
+            throw 'Versioned rollback ownership/ACL mismatch; no replacement performed'
+        }
+        $versionedHashes = Get-TreeHashes $rollback
+        Preserve-VersionedRollback $rollback $versionedRollbackPath $versionedHashes
+        $versionedRollbackPreserved = $true
+    } elseif (Test-Path -LiteralPath $legacyRollbackArchive) {
+        throw 'Both unversioned rollback generations require operator review'
+    }
+} elseif ($existingArchives.Count -eq 1) {
+    $versionedRollbackPath = $existingArchives[0].FullName
+    if ($existingArchives[0].Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw 'Versioned rollback archive is redirected; no replacement performed'
+    }
+    $manifestPath = Join-Path $versionedRollbackPath 'worker-build.json'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        throw 'Versioned rollback archive manifest missing; no replacement performed'
+    }
+    $archived = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 |
+        ConvertFrom-Json
+    $versionedRollbackBuild = [string]$archived.commit
+    if ($archived.schema_version -ne 1 -or
+        $versionedRollbackBuild -notmatch '^[0-9a-f]{40}$' -or
+        $existingArchives[0].Name -ne
+            "CaptainCloudWorker01.rollback-versioned-$versionedRollbackBuild" -or
+        -not (Test-Path -LiteralPath `
+            (Join-Path $versionedRollbackPath 'fpl_bot\captain_worker_cli.py') `
+            -PathType Leaf) -or
+        (Test-Path -LiteralPath `
+            (Join-Path $versionedRollbackPath 'FPLReviewCaptainProfile'))) {
+        throw 'Versioned rollback archive invalid; no replacement performed'
+    }
+    Assert-WorkerArchiveContent $versionedRollbackPath
+    Read-WorkerConfig (Join-Path $versionedRollbackPath 'worker-config.json') `
+        $root $profile | Out-Null
+    $archiveAcl = Get-Acl -LiteralPath $versionedRollbackPath
+    if (-not $archiveAcl.AreAccessRulesProtected -or
+        $archiveAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value `
+            -ne $identity.User.Value) {
+        throw 'Versioned rollback archive ownership/ACL mismatch; no replacement performed'
+    }
+    $versionedRollbackPreserved = $true
 }
 
 $legacyRollbackPreserved = $false
@@ -304,6 +405,9 @@ try {
     rollback_retained = $true
     legacy_rollback_preserved = $legacyRollbackPreserved
     legacy_rollback_path = $legacyRollbackPath
+    versioned_rollback_preserved = $versionedRollbackPreserved
+    versioned_rollback_path = $versionedRollbackPath
+    versioned_rollback_build = $versionedRollbackBuild
     task_temporarily_disabled = $false
     task_enabled = $true
     task_trigger = 'boot_delay_30_seconds'

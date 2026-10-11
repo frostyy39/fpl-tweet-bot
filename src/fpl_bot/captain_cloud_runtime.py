@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from flask import jsonify, request
+from flask import g, jsonify, request
 
 from fpl_bot.api import FplApiClient
 from fpl_bot.captain_cloud_tasks import CaptainCloudTasksAdapter, CaptainCloudTasksConfig
@@ -15,6 +15,7 @@ from fpl_bot.captain_controller import CaptainController
 from fpl_bot.captain_firestore import FirestoreCaptainRepository, FirestoreCaptainVmOperations
 from fpl_bot.captain_http import (
     CaptainAuthConfig,
+    DualPurposeWorkerService,
     GoogleOidcAuthorizer,
     WorkerControllerService,
     create_captain_app,
@@ -22,7 +23,13 @@ from fpl_bot.captain_http import (
 )
 from fpl_bot.captain_no_post_audit import AuditedValidator, FirestoreNoPostAudit
 from fpl_bot.captain_serialization import to_document
-from fpl_bot.captain_state import GenerationStatus, PostKey, StateConflict, VmPhase
+from fpl_bot.captain_state import (
+    REHEARSAL_DESTINATION_USER_ID,
+    GenerationStatus,
+    PostKey,
+    StateConflict,
+    VmPhase,
+)
 from fpl_bot.captain_validation import CaptainCandidateValidator, PersistedCandidateValidator
 from fpl_bot.captain_vm_operations import OperationPhase, VmAction
 from fpl_bot.events import parse_events, select_next_event
@@ -81,8 +88,13 @@ class NoPostDriver:
     def __init__(self, controller, scheduler, compute):
         self.controller, self.scheduler, self.compute = controller, scheduler, compute
 
-    def advance(self):
+    def advance(self, destination_user_id=None):
         c = self.controller
+        owner = c.repository.vm_use()
+        if owner is not None and destination_user_id is not None:
+            generation = c.repository.generation(owner.generation_id)
+            if generation.key.destination_user_id != destination_user_id:
+                raise StateConflict("VM owner belongs to another Captain purpose")
         c.reconcile_vm()
         lease = c.repository.vm_use()
         outcome = "idle"
@@ -107,7 +119,7 @@ class NoPostDriver:
                         == GenerationStatus.WARMING
                     ):
                         c.confirm_runtime_ready(lease.generation_id)
-        c.reconcile_tasks(self.scheduler)
+        c.reconcile_tasks(self.scheduler, destination_user_id)
         return outcome
 
 
@@ -123,11 +135,20 @@ def compose(
     *,
     audit_sink=None,
     publisher_router=None,
+    rehearsal_enabled=False,
 ):
     """Injectable composition for offline tests and the isolated real cloud runtime."""
     no_post = publisher_router is None
     controller = CaptainController(repository, source, clock, operations)
     service = WorkerControllerService(repository, source, clock, config.destination_user_id)
+    if rehearsal_enabled:
+        if publisher_router is None:
+            raise ValueError("dual-purpose rehearsal requires a production router")
+        service = DualPurposeWorkerService(
+            repository,
+            service,
+            WorkerControllerService(repository, source, clock, REHEARSAL_DESTINATION_USER_ID),
+        )
     compute = CaptainComputeReconciler(repository, operations, provider, clock.now)
     driver = NoPostDriver(controller, scheduler, compute)
     validator = PersistedCandidateValidator(
@@ -159,7 +180,7 @@ def compose(
 
     @app.post("/captain/control/rehearsal")
     def rehearsal():
-        if publisher_router is not None:
+        if publisher_router is not None and not rehearsal_enabled:
             raise PermissionError("production controller has no rehearsal endpoint")
         caller = authorizer.authorize(request.headers.get("Authorization", ""), config.origin)
         if caller.email != config.planner_email:
@@ -181,12 +202,15 @@ def compose(
             release_utc = datetime.fromisoformat(data["release_utc"].replace("Z", "+00:00"))
         except (AttributeError, TypeError, ValueError):
             raise ValueError("invalid rehearsal request") from None
-        result = controller.plan_rehearsal(config.destination_user_id, rehearsal_id, release_utc)
-        outcome = driver.advance()
+        destination = (
+            REHEARSAL_DESTINATION_USER_ID if rehearsal_enabled else config.destination_user_id
+        )
+        result = controller.plan_rehearsal(destination, rehearsal_id, release_utc)
+        outcome = driver.advance(destination)
         binding = repository.rehearsal(result.generation.assignment.generation_id)
         return jsonify(
             {
-                "no_post": no_post,
+                "no_post": True,
                 "postable": False,
                 "purpose": binding.purpose,
                 "vm": outcome,
@@ -211,15 +235,41 @@ def compose(
             }
         )
 
+    @app.post("/captain/control/rehearsal/reconcile")
+    def rehearsal_reconcile():
+        if not (rehearsal_enabled or no_post):
+            raise PermissionError("rehearsal reconciliation is disabled")
+        caller = authorizer.authorize(request.headers.get("Authorization", ""), config.origin)
+        if caller.email != config.planner_email:
+            raise PermissionError("planner identity denied")
+        return jsonify(
+            {
+                "no_post": True,
+                "postable": False,
+                "vm": driver.advance(REHEARSAL_DESTINATION_USER_ID),
+            }
+        )
+
     @app.post("/captain/control/inspect")
     def inspect():
         caller = authorizer.authorize(request.headers.get("Authorization", ""), config.origin)
         if caller.email != config.planner_email:
             raise PermissionError("planner identity denied")
+        selection = request.get_json(silent=True)
+        if selection is None:
+            selection = {}
+        if type(selection) is not dict or selection not in (
+            {},
+            {"purpose": "non_postable_rehearsal"},
+        ):
+            raise ValueError("invalid inspect purpose")
+        if selection and not (rehearsal_enabled or no_post):
+            raise PermissionError("rehearsal inspection is disabled")
         event = select_next_event(
             parse_events(source.fetch_bootstrap_static()["events"]), clock.now()
         )
-        generation = repository.current(PostKey(config.destination_user_id, event.event_id))
+        destination = REHEARSAL_DESTINATION_USER_ID if selection else config.destination_user_id
+        generation = repository.current(PostKey(destination, event.event_id))
         lease = repository.vm_use()
         binding = repository.rehearsal(generation.assignment.generation_id) if generation else None
         attempt = (
@@ -260,7 +310,7 @@ def compose(
             request.path.startswith("/captain/tasks/") or request.path == "/captain/worker/handoff"
         ):
             try:
-                driver.advance()
+                driver.advance(getattr(g, "captain_destination", None))
             except Exception:
                 # Keep durable state/intent for the next tick. Do not expose
                 # provider response bodies or turn an acknowledged handoff into

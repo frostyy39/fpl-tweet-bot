@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
-from flask import Flask, jsonify, request
+from flask import Flask, g, jsonify, request
 
 from fpl_bot.captain_controller import CaptainController
 from fpl_bot.captain_handoff import ProjectionHandoff
@@ -12,7 +12,13 @@ from fpl_bot.captain_orchestration_timing import require_utc, utc_text
 from fpl_bot.captain_publication_tasks import instruction_for_candidate
 from fpl_bot.captain_release_diagnostics import ReleaseRejectionDiagnostic
 from fpl_bot.captain_serialization import from_document
-from fpl_bot.captain_state import GenerationStatus, PostKey, StateConflict, TaskKind
+from fpl_bot.captain_state import (
+    REHEARSAL_DESTINATION_USER_ID,
+    GenerationStatus,
+    PostKey,
+    StateConflict,
+    TaskKind,
+)
 from fpl_bot.captain_task_handlers import decode_task_payload
 from fpl_bot.captain_transport import parse_worker_assignment, worker_assignment_payload
 from fpl_bot.captain_worker import (
@@ -214,6 +220,69 @@ class WorkerControllerService:
             )
 
 
+class DualPurposeWorkerService:
+    """Select one trusted production or immutable no-post assignment, never both."""
+
+    def __init__(
+        self,
+        repository,
+        production: WorkerControllerService,
+        rehearsal: WorkerControllerService,
+    ):
+        if (
+            production.destination_user_id == REHEARSAL_DESTINATION_USER_ID
+            or rehearsal.destination_user_id != REHEARSAL_DESTINATION_USER_ID
+        ):
+            raise ValueError("invalid dual-purpose worker destinations")
+        self.repository = repository
+        self.production = production
+        self.rehearsal = rehearsal
+
+    def _now(self):
+        return self.production._now()
+
+    def _service(self, assignment):
+        generation = self.repository.generation(assignment.generation_id)
+        if generation.assignment != assignment:
+            raise StateConflict("worker assignment is not the immutable generation")
+        binding = self.repository.rehearsal(assignment.generation_id)
+        if (
+            generation.key.destination_user_id == self.production.destination_user_id
+            and binding is None
+        ):
+            return self.production
+        if (
+            generation.key.destination_user_id == REHEARSAL_DESTINATION_USER_ID
+            and binding is not None
+            and binding.event_id == assignment.event_id
+            and binding.rehearsal_release_utc == assignment.timing.release_utc
+        ):
+            return self.rehearsal
+        raise StateConflict("worker assignment has no permitted purpose")
+
+    def assignment(self, run_id):
+        candidates = []
+        for service in (self.production, self.rehearsal):
+            work = service.assignment(run_id)
+            if work is not None:
+                try:
+                    if self._service(work.assignment) is service:
+                        candidates.append(work)
+                except StateConflict:
+                    return None
+        return candidates[0] if len(candidates) == 1 else None
+
+    def release(self, work, run_id):
+        return self._service(work.assignment).release(work, run_id)
+
+    def handoff(self, handoff, digest, health=None):
+        return self._service(handoff.assignment).handoff(handoff, digest, health)
+
+    def failure(self, work, run_id, status, release_rejection=None):
+        if work is not None:
+            self._service(work.assignment).failure(work, run_id, status, release_rejection)
+
+
 def create_captain_app(
     service,
     controller: CaptainController,
@@ -280,9 +349,11 @@ def create_captain_app(
         authorize_worker()
         data = request.get_json(force=True)
         health = from_document(data["health"]) if data.get("health") else None
-        receipt = service.handoff(
-            ProjectionHandoff.from_payload(data["handoff"]), data["digest"], health
-        )
+        received = ProjectionHandoff.from_payload(data["handoff"])
+        receipt = service.handoff(received, data["digest"], health)
+        g.captain_destination = controller.repository.generation(
+            received.assignment.generation_id
+        ).key.destination_user_id
         return jsonify(
             {
                 "generation_id": str(receipt.generation_id),
@@ -318,6 +389,7 @@ def create_captain_app(
         if envelope.kind.value != kind:
             raise StateConflict("task envelope conflict")
         result = controller.deliver(envelope)
+        g.captain_destination = envelope.destination_user_id
         if (
             envelope.kind == TaskKind.PUBLISH
             and candidate_validator is not None
@@ -329,12 +401,21 @@ def create_captain_app(
             if attempt is None or attempt.handoff is None:
                 raise StateConflict("publish lacks accepted handoff")
             candidate = candidate_validator.validate(generation.key, attempt.handoff)
+            record = controller.repository.candidate(assignment.generation_id)
+            if controller.repository.rehearsal(assignment.generation_id) is not None:
+                if record is None:
+                    raise StateConflict("validated rehearsal candidate was not persisted")
+                return jsonify(
+                    {
+                        "status": "validated_non_postable_rehearsal",
+                        "event_id": candidate.key.event_id,
+                        "event_code": candidate.assignment.event_code,
+                        "weighted_length": candidate.weighted_length,
+                    }
+                )
             if publication_router is not None:
                 if publication_router.destination_user_id != generation.key.destination_user_id:
                     raise StateConflict("publisher destination does not match generation")
-                if controller.repository.rehearsal(assignment.generation_id) is not None:
-                    raise StateConflict("non-postable rehearsal cannot route to publisher")
-                record = controller.repository.candidate(assignment.generation_id)
                 if record is None:
                     raise StateConflict("validated candidate was not persisted")
                 instruction = instruction_for_candidate(record)

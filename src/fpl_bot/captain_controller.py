@@ -328,11 +328,15 @@ class CaptainController:
             raise StateConflict("stale or conflicting Captain task")
         return current
 
-    def reconcile_tasks(self, scheduler: TaskScheduler) -> tuple[str, ...]:
+    def reconcile_tasks(
+        self, scheduler: TaskScheduler, destination_user_id: str | None = None
+    ) -> tuple[str, ...]:
         """Exceptions leave unacknowledged intents durable; retry confirms the same task."""
         confirmed = []
         for intent in self.repository.pending_intents():
             task = self.envelope(intent)
+            if destination_user_id is not None and task.destination_user_id != destination_user_id:
+                continue
             generation = self._current_task(task)
             if task.kind != TaskKind.CLEANUP and (
                 self._suppressed(generation.key)

@@ -59,9 +59,9 @@ spec:
                       }
                   elif action == 'inspect':
                       route = '/captain/control/inspect'
-                      payload = {}
+                      payload = {'purpose': 'non_postable_rehearsal'}
                   elif action == 'reconcile':
-                      route = '/captain/control/reconcile'
+                      route = '/captain/control/rehearsal/reconcile'
                       payload = {}
                   else:
                       raise SystemExit('unsupported operator action')

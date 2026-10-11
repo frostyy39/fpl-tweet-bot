@@ -1,5 +1,8 @@
 [CmdletBinding(SupportsShouldProcess)]
-param([Parameter(Mandatory=$true)][string]$Image)
+param(
+    [Parameter(Mandatory=$true)][string]$Image,
+    [switch]$EnableNonPostRehearsal
+)
 
 $ErrorActionPreference = 'Stop'
 $project = 'fpl-frosty-bot-v1'
@@ -50,7 +53,8 @@ $settings = @(
     "CAPTAIN_PLANNER_EMAIL=captain-planner@$project.iam.gserviceaccount.com",
     "CAPTAIN_DESTINATION_USER_ID=$productionUserId",
     "CAPTAIN_PUBLISHER_ORIGIN=$publisherOrigin",
-    "CAPTAIN_PUBLISHER_INVOKER_EMAIL=captain-prod-pub-invoker@$project.iam.gserviceaccount.com"
+    "CAPTAIN_PUBLISHER_INVOKER_EMAIL=captain-prod-pub-invoker@$project.iam.gserviceaccount.com",
+    "CAPTAIN_NONPOST_REHEARSAL_ENABLED=$($EnableNonPostRehearsal.IsPresent.ToString().ToLowerInvariant())"
 ) -join ','
 Cloud run deploy $service "--project=$project" "--region=$region" "--image=$Image" `
     '--no-allow-unauthenticated' `

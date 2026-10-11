@@ -184,12 +184,22 @@ def controller_environment():
 
 
 def test_production_controller_configuration_is_fixed_and_has_no_test_mode():
-    assert (
-        ProductionCaptainControllerConfig.environment(controller_environment()).destination_user_id
-        == PRODUCTION_ID
-    )
+    config = ProductionCaptainControllerConfig.environment(controller_environment())
+    assert config.destination_user_id == PRODUCTION_ID
+    assert config.nonpost_rehearsal_enabled is False
     values = controller_environment()
     values["CAPTAIN_DESTINATION_USER_ID"] = "1"
+    with pytest.raises(ValueError):
+        ProductionCaptainControllerConfig.environment(values)
+
+
+def test_production_rehearsal_switch_is_explicit_and_cannot_change_destination():
+    values = controller_environment()
+    values["CAPTAIN_NONPOST_REHEARSAL_ENABLED"] = "true"
+    config = ProductionCaptainControllerConfig.environment(values)
+    assert config.nonpost_rehearsal_enabled is True
+    assert config.destination_user_id == PRODUCTION_ID
+    values["CAPTAIN_NONPOST_REHEARSAL_ENABLED"] = "yes"
     with pytest.raises(ValueError):
         ProductionCaptainControllerConfig.environment(values)
 
