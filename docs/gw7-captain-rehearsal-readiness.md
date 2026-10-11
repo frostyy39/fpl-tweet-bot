@@ -50,74 +50,80 @@ the proposed clock-skew behavioural change.
 
 ## Worker rollback inventory and preservation
 
-The installed worker remains build `3a71ad6e78f8f54789b51be8bdbaef1b2b0222cc`.
-The diagnostic bundle is build `98a09c5278deeff289b30fdb7e5123315f116abf`,
-ZIP SHA-256 `FC3E498305FF285D21E844DE548DA61FDC665157841F8A401DF216E02D9EC02B`.
-The two occupied rollback slots reported by the operator are a versioned
-`CaptainCloudWorker01.rollback` and
-`CaptainCloudWorker01.rollback-legacy-unversioned`. Their exact on-VM
-manifests, ownership, and hashes must be checked before replacement; this
-checkpoint does not claim to have read them.
+The reported installed worker is build
+`98a09c5278deeff289b30fdb7e5123315f116abf`. The corrected clock worker
+bundle is build `0085c3e036ff977466418356993c5c8638f73605`, ZIP SHA-256
+`C06EB2D1B53D0920BF63528E9DB9640E6C6888AAF010A74520DAEEAB25337561`.
+The reported rollback slot contains `3a71ad6e78f8f54789b51be8bdbaef1b2b0222cc`;
+an older `e27331ef7cda4dbf1a3d8747deb09dfade8bfc49` versioned archive and
+the legacy archive already coexist. These are historical reports, not a new
+read of the stopped VM: inspect their actual names, manifests, owner/ACL and
+hashes during the next approved maintenance session before replacement.
 
-The revised same-user script validates the versioned rollback's manifest,
-private configuration, source closure, owner/ACL and tree hashes, then renames
-it in the same parent to `CaptainCloudWorker01.rollback-versioned-<commit>`.
-It verifies the hashes after the rename. It neither overwrites nor deletes the
-existing legacy archive. It then stages the new bundle, preserving the current
-private config and historical audits, and swaps directories using the fixed
-rollback slot. A target collision, malformed archive or hash mismatch stops
-the replacement for operator review. If a post-rename hash check fails, the
-preserved archive is retained; no automatic deletion or speculative retry is
-allowed. The currently installed worker remains intact until the staged bundle
-is verified and swapped. The password-backed Scheduled Task is checked but
-never re-registered, and the sibling FPL Review browser profile is not moved,
-copied or opened.
+The same-user installer now validates **every** existing versioned archive,
+including its build-named directory, manifest, private configuration, worker
+entry point, owner/ACL, non-redirected content and SHA-256 tree. Distinct
+builds coexist as `CaptainCloudWorker01.rollback-versioned-<commit>`. The
+current versioned rollback is moved into a *new* build-named archive only after
+all prior archives are validated. If the same build is already archived, the
+trees must be byte-identical; the rollback is retained under
+`...rollback-versioned-<commit>-duplicate-<tree-SHA256>`. A content mismatch or
+occupied target stops without overwriting either copy. Multiple archives are
+append-only: no retention timer or automatic deletion is applied. Existing
+archive directories are never recursively archived. The rollback is renamed,
+not copied, so its historical audit files are not duplicated by archiving.
+
+Only after rollback preservation does the installer stage the new worker,
+preserve the current private config and audits, and atomically rename the
+current root to the rollback slot and the staged root into service. A verified
+repeat invocation with the same installed bundle is a no-op; code drift fails
+closed. A target collision, malformed archive or hash mismatch stops for
+operator review. If a post-rename verification fails, the original worker is
+restored and the failed stage retained; never delete a failed stage or archive
+just to retry. The password-backed Scheduled Task is checked but never
+re-registered, and the sibling FPL Review browser profile is not moved, copied
+or opened.
 
 A restore is a separate, supervised same-user operation: first verify the
-target archive manifest/hash and that no worker or Chrome process is running;
-retain the current root under a new unoccupied quarantine name; rename the
+chosen canonical or duplicate archive's exact manifest, name/digest, complete
+tree hash and owner/ACL, and confirm no worker or Chrome process is running.
+Retain the current root under a new unoccupied quarantine name; rename the
 chosen archived directory to the original root; verify config/audit hashes,
-ACL, worker import and Scheduled Task contract before boot. Never overwrite
-another generation or remove an archive merely to make room. If any check
-fails, stop with the VM shut down and obtain an explicit recovery review.
+ACL, worker import and Scheduled Task contract before boot. A restore consumes
+that archive name by rename, so record its identity in the audit; never copy
+browser data, overwrite another generation or remove an archive merely to
+make room. If any check fails, stop with the VM shut down and obtain an
+explicit recovery review.
 
-## Next authorized operation — bounded sequence, not executed here
+### Next corrected-worker installation (separate authorization required)
 
-1. Read-only preflight: verify the exact Git/image/bundle hashes, fresh official
-   event/deadline, Captain publisher disabled, planner/queue paused, no live
-   production assignment/publication, VM `TERMINATED`, four-hour STOP safeguard,
-   and Good Luck unchanged. Reject simultaneous diagnostic/production work.
-2. Build an immutable controller image from this reviewed checkpoint and deploy
-   with `deploy-captain-production-controller.ps1 -EnableNonPostRehearsal` while
-   all production controls remain paused and publisher disabled. Verify the
-   controller revision, OIDC route and default production inspection. Do not
-   enable posting or recurring planning.
-3. With a separate maintenance approval, boot the VM once. Stop for the
-   operator to connect over the approved IAP/RDP path as `captaintrial`; never
-   request the Windows password in chat or command arguments. Before running
-   replacement, inspect both occupied rollback generations and the actual
-   Scheduled Task. Transfer only the reviewed ZIP and replacement script.
-4. Under `captaintrial`, run the reviewed replacement with the exact build and
-   ZIP hash above. Verify `replacement_verified`, installed build, both
-   archived generations, config/audit preservation, unchanged browser profile,
-   owner/ACL and password-backed boot trigger. Do not launch Chrome or run the
-   worker manually. Operator signs out and closes RDP/IAP; stop the VM and
-   independently confirm `TERMINATED`.
-5. Only after that proof, under separate rehearsal approval, create exactly one
-   fresh bounded destination-`1` generation via the planner-only route. Keep
-   the recurring planner paused; resume only the Captain queue for the three
-   explicit diagnostic tasks and restore it to paused afterward. A genuine
-   cold boot with no RDP must exercise the installed worker release predicates.
-   Inspect local/central release-rejection subcode and bounded clock evidence.
-   If rejected, stop and diagnose; do not blind-retry or apply a timing bypass.
-6. If accepted, allow the single non-postable run to proceed through FPL Review,
-   handoff and fresh cloud validation. Confirm no production publication task,
-   claim, `write_started`, OAuth access or X request. Reconcile STOP and require
-   independent Compute `TERMINATED` evidence. Remove temporary tasks/jobs,
-   pause the Captain queue, leave planner/publisher disabled, and retain audits.
+1. With the VM still `TERMINATED`, verify the Captain publisher is disabled,
+   planner/queue paused, no postable assignment or dispatchable publication,
+   and four-hour Compute `STOP` protection active. Do not touch Good Luck.
+2. Boot only for interactive `captaintrial` maintenance. Before replacement,
+   inspect the current root, fixed rollback, every versioned archive and legacy
+   archive read-only; verify build IDs, config/audit hashes, owner/ACL, profile
+   separation, and the password-backed boot task. Stop if this differs from
+   the inventory above or any archive differs from its manifest/name.
+3. Transfer the existing verified `0085c3e...` ZIP (SHA-256 above) and the
+   newly reviewed replacement script as separate files. Recheck both hashes on
+   Windows; do not use an older script with the same filename. Run the script
+   once under `captaintrial` with the expected commit and ZIP hash. Confirm
+   `replacement_verified`, current installed build, append-only archives,
+   retained `98a09c...` rollback, audit hashes and unchanged task/profile.
+4. Sign out, close RDP/IAP, stop the VM and independently confirm `TERMINATED`.
+   Keep publisher/planner/queue disabled/paused. A later, separately authorized
+   non-postable cold-boot rehearsal is required before any arming decision.
 
-The controller change is small and the diagnostic release path is testable, so
-GW7 readiness remains technically plausible. It is **not** yet established:
-the compatible controller has not been deployed, the diagnostic worker has not
-been installed, and no new release diagnostic has been observed. Any GW7
-production rearming requires separate evidence review and authorization.
+## Status after the first GW7 diagnostic rehearsal
+
+The compatible controller is already deployed as `captain-controller-00006-js7`.
+Build `98a09c5278deeff289b30fdb7e5123315f116abf` passed one genuine
+non-postable cold-boot rehearsal, including worker release, FPL Review,
+handoff, candidate validation and confirmed VM termination. That success did
+not identify GW6's historical release-rejection predicate. The separately
+reviewed clock correction is in build `0085c3e036ff977466418356993c5c8638f73605`,
+which is **not installed** as of this repository checkpoint. The next action is
+the corrected-worker installation above; another rehearsal and any production
+rearming each require their own authorization. Do not redeploy the unchanged
+controller merely to install the corrected worker.
