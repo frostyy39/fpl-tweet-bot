@@ -191,6 +191,24 @@ def test_reproducible_deployment_is_private_disabled_and_separate():
     assert "fpl-bot-invoker@" not in deploy
 
 
+def test_production_checker_retry_policy_is_bounded_and_shared_by_create_and_update():
+    root = Path(__file__).parents[1]
+    deploy = (root / "deploy/deploy-production-good-luck.ps1").read_text(encoding="utf-8")
+    scheduler_retry = deploy.split("$schedulerRetry = @(", 1)[1].split("\n)", 1)[0]
+    retry_policy = (
+        "'--max-retry-attempts=5'",
+        "'--max-retry-duration=0s'",
+        "'--min-backoff=60s'",
+        "'--max-backoff=300s'",
+        "'--max-doublings=2'",
+    )
+    assert all(scheduler_retry.count(flag) == 1 for flag in retry_policy)
+    assert deploy.count("@schedulerRetry") == 2
+    assert deploy.count("'--attempt-deadline=60s' @schedulerRetry") == 2
+    assert deploy.count('"--schedule=0 6 * * *"') == 2
+    assert deploy.count("'--time-zone=Europe/London'") == 2
+
+
 def test_live_probe_definitions_are_non_posting_and_cover_effective_boundaries():
     root = Path(__file__).parents[1]
     names = (

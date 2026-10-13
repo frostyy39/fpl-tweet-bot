@@ -183,6 +183,22 @@ def test_repeated_identical_create_already_exists_is_idempotent() -> None:
     assert record.context.scheduled_task_status == ScheduledTaskAuditStatus.ALREADY_ARMED.value
 
 
+def test_six_arming_attempts_reconcile_one_deterministic_deadline_task() -> None:
+    store = RecordingStateStore()
+    boundary = FakeTaskBoundary()
+    armer = make_armer(store, boundary)
+    outcomes = [armer.arm(instruction())]
+    boundary.disposition = CloudTaskCreateDisposition.ALREADY_EXISTS
+
+    outcomes.extend(armer.arm(instruction()) for _ in range(5))
+
+    assert outcomes[0].status is TaskArmingStatus.ARMED
+    assert all(outcome.status is TaskArmingStatus.ALREADY_ARMED for outcome in outcomes[1:])
+    assert len({call.task_name for call in boundary.create_calls}) == 1
+    assert len({call.payload for call in boundary.create_calls}) == 1
+    assert store.claim_calls == 0
+
+
 def test_definite_create_failure_is_audited_once_and_not_retried() -> None:
     store = RecordingStateStore()
     definition_name = FakeTaskBoundary().build_task(instruction()).task_name

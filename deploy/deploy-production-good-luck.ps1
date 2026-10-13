@@ -15,6 +15,13 @@ $service = 'good-luck-production'
 $database = 'production-good-luck-state'
 $queue = 'production-good-luck-deadline'
 $scheduler = 'good-luck-production-checker'
+$schedulerRetry = @(
+    '--max-retry-attempts=5',
+    '--max-retry-duration=0s',
+    '--min-backoff=60s',
+    '--max-backoff=300s',
+    '--max-doublings=2'
+)
 $runtime = "good-luck-production-runtime@$project.iam.gserviceaccount.com"
 $invoker = "good-luck-production-invoker@$project.iam.gserviceaccount.com"
 $origin = "https://$service-$projectNumber.$serviceRegion.run.app"
@@ -116,13 +123,13 @@ if ($schedulers -notcontains $scheduler) {
     Cloud scheduler jobs create http $scheduler "--project=$project" "--location=$controlRegion" `
         "--schedule=0 6 * * *" '--time-zone=Europe/London' '--http-method=POST' `
         "--uri=$origin/checker/run" "--oidc-service-account-email=$invoker" `
-        "--oidc-token-audience=$origin" '--attempt-deadline=60s'
+        "--oidc-token-audience=$origin" '--attempt-deadline=60s' @schedulerRetry
 }
 else {
     Cloud scheduler jobs update http $scheduler "--project=$project" "--location=$controlRegion" `
         "--schedule=0 6 * * *" '--time-zone=Europe/London' '--http-method=POST' `
         "--uri=$origin/checker/run" "--oidc-service-account-email=$invoker" `
-        "--oidc-token-audience=$origin" '--attempt-deadline=60s'
+        "--oidc-token-audience=$origin" '--attempt-deadline=60s' @schedulerRetry
 }
 Cloud scheduler jobs pause $scheduler "--project=$project" "--location=$controlRegion"
 
