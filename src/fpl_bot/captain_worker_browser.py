@@ -12,7 +12,8 @@ from fpl_bot.captain_handoff import (
 )
 from fpl_bot.captain_review_browser import (
     PlaywrightReviewBrowserAcquirer,
-    parse_review_projection_table,
+    ReviewRankedPrefixEvidence,
+    require_ranked_prefix,
 )
 from fpl_bot.captain_worker import (
     AcquiredDataset,
@@ -27,8 +28,10 @@ from fpl_bot.errors import CaptainReviewBrowserError
 class ProvenBrowserAcquisition:
     def __init__(self, profile_directory: Path) -> None:
         self.profile_directory = profile_directory
+        self.last_coverage: ReviewRankedPrefixEvidence | None = None
 
     def acquire(self, event_id: int) -> AcquiredDataset:
+        self.last_coverage = None
         started = monotonic()
         profile_exists = False
         acquirer = None
@@ -48,7 +51,8 @@ class ProvenBrowserAcquisition:
                 or acquirer.last_lifecycle.get("ownership") != "released"
             ):
                 raise CaptainReviewBrowserError("browser_profile_unclean")
-            table = parse_review_projection_table(snapshot, event_id)
+            table = require_ranked_prefix(snapshot, event_id)
+            self.last_coverage = snapshot.ranked_prefix
             return AcquiredDataset(
                 tuple(
                     ProjectionRecord(
@@ -65,6 +69,9 @@ class ProvenBrowserAcquisition:
                     table.auxiliary_row_count,
                     len(table.rows),
                 ),
+                # Complete capture of the verified global ranked prefix. This is
+                # NOT full-universe coverage. The unchanged cloud validator must
+                # find a differential in the prefix or refuse the candidate.
                 CompletenessStatus.COMPLETE,
                 AuthenticationStatus.AUTHENTICATED,
                 CleanupStatus.RELEASED,
@@ -167,6 +174,13 @@ def _classify(
     browser_process_created: bool,
     navigation_began: bool,
 ) -> tuple[AcquisitionFailureCode, AcquisitionStage]:
+    coverage_errors = {
+        "projection_sort_not_verified": AcquisitionFailureCode.REVIEW_SORT_NOT_VERIFIED,
+        "projection_scope_not_verified": AcquisitionFailureCode.REVIEW_SCOPE_NOT_VERIFIED,
+        "ranked_prefix_not_verified": AcquisitionFailureCode.REVIEW_PREFIX_NOT_VERIFIED,
+    }
+    if category in coverage_errors:
+        return coverage_errors[category], AcquisitionStage.TABLE_PROCESSING
     if category in {"stable_chrome_unavailable", "stable_chrome_ambiguous"}:
         return AcquisitionFailureCode.BROWSER_EXECUTABLE_UNAVAILABLE, (
             AcquisitionStage.EXECUTABLE_RESOLUTION

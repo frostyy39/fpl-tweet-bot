@@ -125,6 +125,9 @@ class AcquisitionFailureCode(StrEnum):
     NAVIGATION_FAILED = "navigation_failed"
     REVIEW_AUTHENTICATION_REQUIRED = "review_authentication_required"
     REVIEW_APPLICATION_FAILURE = "review_application_failure"
+    REVIEW_SORT_NOT_VERIFIED = "review_sort_not_verified"
+    REVIEW_SCOPE_NOT_VERIFIED = "review_scope_not_verified"
+    REVIEW_PREFIX_NOT_VERIFIED = "review_prefix_not_verified"
     ACQUISITION_TIMEOUT = "acquisition_timeout"
     UNEXPECTED_INTERNAL_FAILURE = "unexpected_internal_failure"
 

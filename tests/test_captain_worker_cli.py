@@ -1,10 +1,12 @@
 import getpass
 import json
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 from fpl_bot import captain_worker_cli as cli
 from fpl_bot.captain_orchestration_timing import CaptainTiming
 from fpl_bot.captain_release_diagnostics import ReleaseRejectionCode, release_diagnostic
+from fpl_bot.captain_review_browser import ReviewRankedPrefixEvidence
 from fpl_bot.captain_worker import (
     AcquisitionFailureCode,
     AcquisitionFailureDiagnostic,
@@ -49,7 +51,8 @@ def test_no_assignment_cli_writes_private_utf8_audit_without_touching_browser(
     assert len(audits) == 1
     audit = json.loads(audits[0].read_bytes().decode("utf-8", errors="strict"))
     assert audit["status"] == "no_assignment" and audit["no_post"] is True
-    assert audit["schema_version"] == 3
+    assert audit["schema_version"] == 4
+    assert audit["projection_coverage"] is None
     assert audit["worker_build_id"] == "unverified"
     assert audit["acquisition_failure"] is None
     assert audit["release_rejection"] is None
@@ -166,7 +169,8 @@ def test_cli_persists_only_allowlisted_release_rejection(tmp_path, monkeypatch):
     assert cli.main(["--config", str(config)]) == 1
     raw = next(tmp_path.glob("*/audit.json")).read_text(encoding="utf-8")
     audit = json.loads(raw)
-    assert audit["schema_version"] == 3
+    assert audit["schema_version"] == 4
+    assert audit["projection_coverage"] is None
     assert audit["release_rejection"] == diagnostic.to_payload()
     assert audit["handoff"] is None
     assert "SECRET_PROFILE" not in raw
@@ -180,3 +184,46 @@ def test_worker_build_id_rejects_malformed_manifest(tmp_path):
     ):
         (tmp_path / "worker-build.json").write_text(json.dumps(document), encoding="utf-8")
         assert cli._worker_build_id(tmp_path / "config.json") == "unverified"
+
+
+def test_cli_persists_sanitized_coverage_without_overwriting_old_audit(tmp_path, monkeypatch):
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "controller_origin": "https://captain-controller.example",
+                "profile_dir": str(tmp_path / "SECRET_PROFILE"),
+                "expected_user": getpass.getuser(),
+                "audit_parent": str(tmp_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    historical = tmp_path / "historical"
+    historical.mkdir()
+    old_audit = historical / "audit.json"
+    old_audit.write_text("ORIGINAL_AUDIT", encoding="utf-8")
+    proof = ReviewRankedPrefixEvidence(
+        8, datetime(2026, 10, 17, tzinfo=UTC), 50, "b" * 64, Decimal(9), Decimal(4), 1, 5
+    )
+
+    class Worker:
+        def __init__(self, client, acquisition, *_args, **_kwargs):
+            self.acquisition = acquisition
+
+        def run(self):
+            self.acquisition.last_coverage = proof
+            return WorkerResult(WorkerStatus.SUCCEEDED)
+
+    monkeypatch.setattr(cli, "CaptainWorkerHttpClient", lambda *_: object())
+    monkeypatch.setattr(cli, "CaptainWorker", Worker)
+    monkeypatch.setattr(cli.signal, "signal", lambda *_: None)
+    assert cli.main(["--config", str(config)]) == 0
+    paths = [p for p in tmp_path.glob("*/audit.json") if p != old_audit]
+    assert len(paths) == 1
+    raw = paths[0].read_text(encoding="utf-8")
+    audit = json.loads(raw)
+    assert audit["schema_version"] == 4
+    assert audit["projection_coverage"] == proof.to_payload()
+    assert "SECRET_PROFILE" not in raw
+    assert old_audit.read_text(encoding="utf-8") == "ORIGINAL_AUDIT"

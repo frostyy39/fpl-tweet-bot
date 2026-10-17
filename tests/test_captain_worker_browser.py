@@ -1,5 +1,7 @@
 import ast
 import sys
+from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -38,29 +40,57 @@ def test_bridge_reuses_closed_browser_and_canonical_parser(monkeypatch, ownershi
         def acquire(self, event_id):
             assert event_id == 5
             events.append("closed")
-            return ReviewPageSnapshot(
+            snapshot = ReviewPageSnapshot(
                 (
                     ReviewDomTable(
                         header_rows=(
                             tuple(
-                                ReviewDomCell(s)
+                                ReviewDomCell(
+                                    s,
+                                    tag_name="th",
+                                    sort_direction="descending" if s == "GW5" else "none",
+                                    sort_active=s == "GW5",
+                                )
                                 for s in ("PLAYER", "PRICE", "GW5", "TOTAL", "ELITE OWN%")
                             ),
                         ),
-                        body_rows=(
+                        body_rows=tuple(
                             tuple(
                                 ReviewDomCell(s)
                                 for s in (
-                                    "João Pedro\nCHE • FWD",
+                                    f"{name}\nCHE • FWD",
                                     "unused",
-                                    points,
+                                    value,
                                     "unused",
                                     "unused",
                                 )
-                            ),
+                            )
+                            for name, value in (
+                                ("João Pedro", points),
+                                ("Second", "5"),
+                                ("Third", "4"),
+                                ("Fourth", "3"),
+                            )
                         ),
                     ),
-                )
+                ),
+                scope=review.ReviewViewScope(True, True, True, True),
+            )
+            if points == "invalid":
+                return snapshot
+            rows = review.parse_review_projection_table(snapshot, 5).rows
+            return replace(
+                snapshot,
+                ranked_prefix=review.ReviewRankedPrefixEvidence(
+                    5,
+                    datetime(2026, 10, 17, tzinfo=UTC),
+                    len(rows),
+                    review._ranked_rows_digest(rows),
+                    rows[0].projected_points,
+                    rows[-1].projected_points,
+                    1,
+                    5,
+                ),
             )
 
     monkeypatch.setattr(bridge, "PlaywrightReviewBrowserAcquirer", FakeAcquirer)
@@ -70,7 +100,8 @@ def test_bridge_reuses_closed_browser_and_canonical_parser(monkeypatch, ownershi
         assert data.records[0].review_name == "João Pedro"
         assert data.records[0].source_ordinal == 1
         assert data.records[0].official_element_id is None
-        assert data.counts.extracted == 1
+        assert data.counts.extracted == 4
+        assert source.last_coverage.row_count == 4
         assert data.cleanup.value == "released"
     else:
         with pytest.raises(AcquisitionDiagnosticError):
@@ -170,6 +201,27 @@ def test_bridge_reuses_closed_browser_and_canonical_parser(monkeypatch, ownershi
             },
             AcquisitionFailureCode.REVIEW_APPLICATION_FAILURE,
             AcquisitionStage.REVIEW_SESSION,
+        ),
+        (
+            "projection_sort_not_verified",
+            "table_processing",
+            {},
+            AcquisitionFailureCode.REVIEW_SORT_NOT_VERIFIED,
+            AcquisitionStage.TABLE_PROCESSING,
+        ),
+        (
+            "projection_scope_not_verified",
+            "table_processing",
+            {},
+            AcquisitionFailureCode.REVIEW_SCOPE_NOT_VERIFIED,
+            AcquisitionStage.TABLE_PROCESSING,
+        ),
+        (
+            "ranked_prefix_not_verified",
+            "table_processing",
+            {},
+            AcquisitionFailureCode.REVIEW_PREFIX_NOT_VERIFIED,
+            AcquisitionStage.TABLE_PROCESSING,
         ),
     ],
 )

@@ -194,7 +194,10 @@ def test_runtime_has_no_secret_or_production_apis():
 
 
 @pytest.mark.parametrize("observer_failure", [False, True])
-def test_acquisition_closes_before_ownership_release(tmp_path, monkeypatch, observer_failure):
+@pytest.mark.parametrize("sort_failure", [False, True])
+def test_acquisition_closes_before_ownership_release(
+    tmp_path, monkeypatch, observer_failure, sort_failure
+):
     import sys
 
     profile = browser.prepare_dedicated_profile(tmp_path / "profile")
@@ -230,6 +233,17 @@ def test_acquisition_closes_before_ownership_release(tmp_path, monkeypatch, obse
         "_wait_for_projections_view",
         lambda *a, **k: SimpleNamespace(snapshot=snapshot, diagnostic=None),
     )
+    sort_calls = []
+
+    def sort_view(actual_page, event_id, timeout):
+        assert actual_page is page and event_id == 4 and timeout > 0
+        assert (profile / runtime.OWNERSHIP_FILE).exists() and not events
+        sort_calls.append(event_id)
+        if sort_failure:
+            raise CaptainReviewBrowserError("projection_sort_not_verified")
+        return snapshot
+
+    monkeypatch.setattr(browser, "_wait_for_ranked_projection_view", sort_view)
     observations = []
 
     def observe(value):
@@ -239,13 +253,14 @@ def test_acquisition_closes_before_ownership_release(tmp_path, monkeypatch, obse
             raise ValueError("metadata observer failed")
 
     acquirer = browser.PlaywrightReviewBrowserAcquirer(profile, session_observer=observe)
-    if observer_failure:
+    if observer_failure or sort_failure:
         with pytest.raises(CaptainReviewBrowserError):
             acquirer.acquire(4)
     else:
         assert acquirer.acquire(4) is snapshot
         assert [o.authentication.value for o in observations] == ["not_confirmed", "authenticated"]
         assert all(o.expiry_kind.value == "unknown" for o in observations)
+    assert sort_calls == ([] if observer_failure else [4])
     assert events == ["closed"]
     assert not (profile / runtime.OWNERSHIP_FILE).exists()
     assert acquirer.last_lifecycle["ownership"] == "released"

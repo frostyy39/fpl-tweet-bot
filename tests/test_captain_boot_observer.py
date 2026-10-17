@@ -135,11 +135,20 @@ def test_boot_observer_rejects_unexpected_task_identity(tmp_path):
     assert report(result)["observation"] == "task_contract_mismatch"
 
 
-def test_boot_observer_forwards_only_allowlisted_acquisition_diagnostic(tmp_path):
+@pytest.mark.parametrize(
+    "code,stage",
+    [
+        ("browser_process_launch_failed", "browser_launch"),
+        ("review_sort_not_verified", "table_processing"),
+        ("review_scope_not_verified", "table_processing"),
+        ("review_prefix_not_verified", "table_processing"),
+    ],
+)
+def test_boot_observer_forwards_only_allowlisted_acquisition_diagnostic(tmp_path, code, stage):
     diagnostic = {
         "schema_version": 1,
-        "code": "browser_process_launch_failed",
-        "stage": "browser_launch",
+        "code": code,
+        "stage": stage,
         "browser_executable_resolved": True,
         "profile_directory_exists": True,
         "browser_process_created": False,

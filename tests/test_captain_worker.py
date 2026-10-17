@@ -365,11 +365,20 @@ def test_errors_are_sanitized_no_partial_handoff(setup, error, expected, capsys)
     assert not client.submissions and capsys.readouterr().out == ""
 
 
-def test_typed_acquisition_failure_never_creates_handoff_authority(setup):
+@pytest.mark.parametrize(
+    "code",
+    [
+        AcquisitionFailureCode.BROWSER_PROCESS_LAUNCH_FAILED,
+        AcquisitionFailureCode.REVIEW_SORT_NOT_VERIFIED,
+        AcquisitionFailureCode.REVIEW_SCOPE_NOT_VERIFIED,
+        AcquisitionFailureCode.REVIEW_PREFIX_NOT_VERIFIED,
+    ],
+)
+def test_typed_acquisition_failure_never_creates_handoff_authority(setup, code):
     worker, client, acquisition, _ = setup
     diagnostic = AcquisitionFailureDiagnostic(
         1,
-        AcquisitionFailureCode.BROWSER_PROCESS_LAUNCH_FAILED,
+        code,
         AcquisitionStage.BROWSER_LAUNCH,
         True,
         True,

@@ -573,6 +573,16 @@ acquisition or refresh, `/2/users/me`, exact numeric account-ID verification, an
 standalone test-post runner remains explicitly gated and continues accepting its deliberately
 supplied static `X_USER_ACCESS_TOKEN`; it does not silently opt into unattended refresh.
 
+### Captain projection coverage correction (repository only)
+
+The browser extractor now requires the authoritative event's GW column to be verified
+descending, with unfiltered scope and stable player/value snapshots. It captures a global
+ranked prefix, not a presumed complete 50-player universe. The unchanged cloud selector must
+find both the top three and the highest eligible differential in that prefix, or fail closed.
+This worker change is not installed by editing the repository. Evidence, limits, local audit
+fields and the separately authorized deployment/rehearsal procedure are documented in
+[Captain upcoming-GW sorting](docs/captain-upcoming-gw-sort.md).
+
 ### Disabled Captain publisher
 
 The Captain publisher is a separate private Cloud Run application, hard-bound to FPLBotTest user

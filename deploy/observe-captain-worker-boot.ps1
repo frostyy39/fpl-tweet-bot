@@ -58,6 +58,8 @@ try {
                         'filesystem_permission_denied','browser_exited_immediately',
                         'navigation_failed','review_authentication_required',
                         'review_application_failure','acquisition_timeout',
+                        'review_sort_not_verified','review_scope_not_verified',
+                        'review_prefix_not_verified',
                         'unexpected_internal_failure')
                     $allowedStages = @(
                         'worker_configuration','profile_validation','executable_resolution',

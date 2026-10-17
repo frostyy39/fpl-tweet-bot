@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import subprocess
@@ -53,6 +55,7 @@ _MAX_READINESS_OBSERVATIONS = 40
 _MAX_NAV_CONTROL_TEXTS = 8
 _READINESS_POLL_MILLISECONDS = 200
 _REQUIRED_STABLE_OBSERVATIONS = 2
+_RANKED_STABLE_MILLISECONDS = 800
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,12 +68,94 @@ class ReviewDomCell:
     hidden: bool = False
     display: str = ""
     visibility: str = ""
+    sort_direction: str = "unrecognized"
+    sort_active: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class ReviewDomTable:
     header_rows: tuple[tuple[ReviewDomCell, ...], ...]
     body_rows: tuple[tuple[ReviewDomCell, ...], ...]
+    scroll_top: float = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewViewScope:
+    all_players: bool
+    search_empty: bool
+    price_unrestricted: bool
+    points_metric: bool
+
+    @property
+    def verified(self) -> bool:
+        return all(
+            value is True
+            for value in (
+                self.all_players,
+                self.search_empty,
+                self.price_unrestricted,
+                self.points_metric,
+            )
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewRankedPrefixEvidence:
+    """An audited global-sort contract, not a claim to have read the full universe.
+
+    The unchanged cloud selector must still find a differential within this prefix.
+    No evidence here grants publication authority or supplies an ownership value.
+    """
+
+    event_id: int
+    observed_at_utc: datetime
+    row_count: int
+    row_digest: str
+    first_points: Decimal
+    last_points: Decimal
+    sort_clicks: int
+    stable_observations: int
+
+    def __post_init__(self) -> None:
+        _require_event_id(self.event_id)
+        if (
+            not isinstance(self.observed_at_utc, datetime)
+            or self.observed_at_utc.tzinfo is None
+            or self.observed_at_utc.utcoffset() is None
+            or type(self.row_count) is not int
+            or self.row_count < 4
+            or not isinstance(self.row_digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", self.row_digest)
+            or type(self.sort_clicks) is not int
+            or not 0 <= self.sort_clicks <= 2
+            or type(self.stable_observations) is not int
+            or self.stable_observations < 2
+            or any(
+                not isinstance(value, Decimal) or not value.is_finite()
+                for value in (self.first_points, self.last_points)
+            )
+            or self.first_points < self.last_points
+        ):
+            raise ValueError("invalid ranked prefix evidence")
+
+    def to_payload(self) -> dict:
+        return {
+            "schema_version": 1,
+            "contract": "review_global_gw_prefix_v1",
+            "scope": "all_players_no_search_or_price_filter",
+            "event_id": self.event_id,
+            "column": f"GW{self.event_id}",
+            "direction": "descending",
+            "observed_at_utc": self.observed_at_utc.astimezone(UTC).isoformat(),
+            "row_count": self.row_count,
+            "row_digest": self.row_digest,
+            "first_points": str(self.first_points),
+            "last_points": str(self.last_points),
+            "sort_clicks": self.sort_clicks,
+            "stable_observations": self.stable_observations,
+            "full_source_coverage": False,
+            "selection_sufficiency": "requires_cloud_top_three_and_differential",
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +163,8 @@ class ReviewPageSnapshot:
     tables: tuple[ReviewDomTable, ...]
     login_required: bool = False
     premium_unavailable: bool = False
+    scope: ReviewViewScope | None = None
+    ranked_prefix: ReviewRankedPrefixEvidence | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -507,8 +594,12 @@ class PlaywrightReviewBrowserAcquirer:
                             self._observe_session(AuthenticationStatus.REQUIRED)
                         raise CaptainReviewBrowserError(exc.category) from None
                     self.last_navigation_diagnostic = result.diagnostic
+                    self.last_stage = "table_processing"
+                    ranked = _wait_for_ranked_projection_view(
+                        page, event_id, self._timeout_milliseconds
+                    )
                     self._observe_session(AuthenticationStatus.AUTHENTICATED)
-                    return result.snapshot
+                    return ranked
                 finally:
                     self.last_stage = "cleanup"
                     try:
@@ -1172,7 +1263,7 @@ def _wait_for_projections_view(
             current_key = (
                 alignment,
                 tuple(cell.text for cell in table.header_rows[alignment[1]]),
-                len(table.body_rows),
+                tuple(tuple((cell.text, cell.visible) for cell in row) for row in table.body_rows),
             )
             if current_key == stable_key:
                 stable_observations += 1
@@ -1219,6 +1310,200 @@ def _wait_for_projections_view(
             )
         remaining = timeout_milliseconds - elapsed_milliseconds
         page.wait_for_timeout(min(poll_milliseconds, max(1, remaining)))
+
+
+def _ranked_rows_digest(rows: Sequence[ReviewLogicalProjectionRow]) -> str:
+    payload = [
+        (r.source_row_ordinal, r.display_name, r.team_short_code, str(r.projected_points))
+        for r in rows
+    ]
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def require_ranked_prefix(
+    snapshot: ReviewPageSnapshot, event_id: int
+) -> ReviewCanonicalProjectionTable:
+    """Recheck proof against the exact rows handed to the existing cloud selector."""
+    canonical = parse_review_projection_table(snapshot, event_id)
+    evidence = snapshot.ranked_prefix
+    headers = [
+        cell
+        for table in snapshot.tables
+        for row in table.header_rows
+        for cell in row
+        if cell.visible
+    ]
+    targets = [cell for cell in headers if _header_event_id(cell.text) == event_id]
+    if (
+        not isinstance(evidence, ReviewRankedPrefixEvidence)
+        or evidence.event_id != event_id
+        or evidence.row_count != len(canonical.rows)
+        or evidence.row_digest != _ranked_rows_digest(canonical.rows)
+        or evidence.first_points != canonical.rows[0].projected_points
+        or evidence.last_points != canonical.rows[-1].projected_points
+        or canonical.auxiliary_row_count
+        or len(targets) != 1
+        or targets[0].tag_name != "th"
+        or targets[0].sort_direction != "descending"
+        or not targets[0].sort_active
+        or sum(cell.sort_active for cell in headers) != 1
+        or any(table.scroll_top != 0 for table in snapshot.tables)
+        or len({(row.display_name, row.team_short_code) for row in canonical.rows})
+        != len(canonical.rows)
+        or any(
+            a.projected_points < b.projected_points
+            for a, b in zip(canonical.rows, canonical.rows[1:], strict=False)
+        )
+        or snapshot.scope is None
+        or not snapshot.scope.verified
+    ):
+        raise CaptainReviewBrowserError("ranked_prefix_not_verified")
+    return canonical
+
+
+def _wait_for_ranked_projection_view(
+    page: Any,
+    event_id: int,
+    timeout_milliseconds: int,
+    *,
+    utc_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    monotonic_clock: Callable[[], float] = monotonic,
+    poll_milliseconds: int = _READINESS_POLL_MILLISECONDS,
+) -> ReviewPageSnapshot:
+    """Establish the inspected global GW descending prefix; never scroll for more rows.
+
+    Both the selected TH's underline and its chevron are required. Visible numeric
+    order alone cannot distinguish global sorting from reordering a limited subset.
+    The source's global-sort semantics were independently checked against its CSV;
+    an unsupported UI contract fails closed rather than reverting to Total order.
+    """
+    _require_event_id(event_id)
+    if timeout_milliseconds <= 0 or poll_milliseconds <= 0:
+        raise ValueError("invalid ranked-view timing")
+    started = monotonic_clock()
+    stable_since = started
+    fingerprint = None
+    observations = clicks = 0
+    awaiting_direction = None
+    initial_layout = None
+    while True:
+        elapsed = (monotonic_clock() - started) * 1000
+        if elapsed >= timeout_milliseconds:
+            raise CaptainReviewBrowserError("projection_sort_not_verified")
+        snapshot = _snapshot_page(page)
+        if snapshot.login_required:
+            raise CaptainReviewBrowserError("reauthentication_required")
+        if snapshot.premium_unavailable:
+            raise CaptainReviewBrowserError("premium_unavailable")
+        if snapshot.scope is None or not snapshot.scope.verified:
+            raise CaptainReviewBrowserError("projection_scope_not_verified")
+        alignments = _semantic_projection_alignments(snapshot, event_id)
+        if len(alignments) != 1:
+            raise CaptainReviewBrowserError("projection_sort_not_verified")
+        ti, hi, start, stop = alignments[0]
+        table = snapshot.tables[ti]
+        headers = table.header_rows[hi]
+        layout = (ti, hi, tuple((cell.text, cell.visible) for cell in headers))
+        if initial_layout is None:
+            initial_layout = layout
+        elif layout != initial_layout:
+            raise CaptainReviewBrowserError("projection_sort_not_verified")
+        targets = [i for i in range(start, stop) if _header_event_id(headers[i].text) == event_id]
+        if len(targets) != 1:
+            raise CaptainReviewBrowserError("projection_sort_not_verified")
+        index = targets[0]
+        target = headers[index]
+        if target.tag_name != "th" or target.sort_direction not in {
+            "none",
+            "ascending",
+            "descending",
+        }:
+            raise CaptainReviewBrowserError("projection_sort_not_verified")
+        if awaiting_direction is not None and target.sort_direction != awaiting_direction:
+            awaiting_direction = None
+        if target.sort_direction != "descending":
+            fingerprint = None
+            observations = 0
+            if awaiting_direction is None:
+                if clicks >= 2:
+                    raise CaptainReviewBrowserError("projection_sort_not_verified")
+                try:
+                    page.locator("table").nth(ti).locator("thead tr").nth(hi).locator("th,td").nth(
+                        index
+                    ).click(timeout=max(1, int(timeout_milliseconds - elapsed)))
+                except Exception:
+                    raise CaptainReviewBrowserError("projection_sort_not_verified") from None
+                clicks += 1
+                awaiting_direction = target.sort_direction
+        elif (
+            target.sort_active
+            and sum(cell.sort_active for row in table.header_rows for cell in row) == 1
+        ):
+            awaiting_direction = None
+            if table.scroll_top != 0:
+                # Only return to the start of this list; no pagination/scroll acquisition.
+                try:
+                    page.locator("table").nth(ti).evaluate(_RETURN_TABLE_TO_TOP_JAVASCRIPT)
+                except Exception:
+                    raise CaptainReviewBrowserError("ranked_prefix_not_verified") from None
+                fingerprint = None
+                observations = 0
+            else:
+                canonical = parse_review_projection_table(snapshot, event_id)
+                rows = canonical.rows
+                identities = [(r.display_name, r.team_short_code) for r in rows]
+                if (
+                    len(rows) < 4
+                    or canonical.auxiliary_row_count
+                    or len(identities) != len(set(identities))
+                ):
+                    raise CaptainReviewBrowserError("ranked_prefix_not_verified")
+                descending = all(
+                    a.projected_points >= b.projected_points
+                    for a, b in zip(rows, rows[1:], strict=False)
+                )
+                key = _ranked_rows_digest(rows) if descending else None
+                if key is None or key != fingerprint:
+                    fingerprint = key
+                    stable_since = monotonic_clock()
+                    observations = 1 if key is not None else 0
+                else:
+                    observations += 1
+                if (
+                    fingerprint is not None
+                    and observations >= 2
+                    and (monotonic_clock() - stable_since) * 1000 >= _RANKED_STABLE_MILLISECONDS
+                ):
+                    evidence = ReviewRankedPrefixEvidence(
+                        event_id,
+                        _aware_utc_now(utc_clock),
+                        len(rows),
+                        fingerprint,
+                        rows[0].projected_points,
+                        rows[-1].projected_points,
+                        clicks,
+                        observations,
+                    )
+                    return ReviewPageSnapshot(
+                        (table,), scope=snapshot.scope, ranked_prefix=evidence
+                    )
+        else:
+            fingerprint = None
+            observations = 0
+        remaining = timeout_milliseconds - (monotonic_clock() - started) * 1000
+        page.wait_for_timeout(max(1, min(poll_milliseconds, int(remaining))))
+
+
+_RETURN_TABLE_TO_TOP_JAVASCRIPT = """table => {
+  for (let e = table.parentElement; e; e = e.parentElement) {
+    if (/(auto|scroll)/.test(getComputedStyle(e).overflowY) && e.scrollHeight > e.clientHeight) {
+      e.scrollTop = 0;
+      return;
+    }
+  }
+}"""
 
 
 def _visible_projection_controls(page: Any) -> tuple[tuple[Any, ...], tuple[str, ...]]:
@@ -1386,6 +1671,7 @@ def _snapshot_page(page: Any) -> ReviewPageSnapshot:
             body_rows=tuple(
                 tuple(_snapshot_dom_cell(cell) for cell in row) for row in table["bodyRows"]
             ),
+            scroll_top=table.get("scrollTop", 0),
         )
         for table in result["tables"]
     )
@@ -1393,6 +1679,12 @@ def _snapshot_page(page: Any) -> ReviewPageSnapshot:
         tables=tables,
         login_required=bool(result["loginRequired"]),
         premium_unavailable=bool(result["premiumUnavailable"]),
+        scope=ReviewViewScope(
+            result.get("scope", {}).get("allPlayers") is True,
+            result.get("scope", {}).get("searchEmpty") is True,
+            result.get("scope", {}).get("priceUnrestricted") is True,
+            result.get("scope", {}).get("pointsMetric") is True,
+        ),
     )
 
 
@@ -1406,6 +1698,8 @@ def _snapshot_dom_cell(value: dict[str, Any]) -> ReviewDomCell:
         hidden=bool(value["hidden"]),
         display=str(value["display"]),
         visibility=str(value["visibility"]),
+        sort_direction=value.get("sortDirection", "unrecognized"),
+        sort_active=value.get("sortActive") is True,
     )
 
 
@@ -1418,6 +1712,12 @@ _SNAPSHOT_JAVASCRIPT = """
   };
   const cells = (row, selector) => Array.from(row.querySelectorAll(selector)).map((cell) => {
     const style = window.getComputedStyle(cell);
+    const down = cell.querySelectorAll('svg.lucide-chevron-down').length;
+    const up = cell.querySelectorAll('svg.lucide-chevron-up').length;
+    const inactive = cell.querySelectorAll('svg.lucide-arrow-up-down').length;
+    const direction = down === 1 && up === 0 && inactive === 0 ? 'descending' :
+      up === 1 && down === 0 && inactive === 0 ? 'ascending' :
+      inactive === 1 && down === 0 && up === 0 ? 'none' : 'unrecognized';
     return {
       text: cell.innerText.trim().slice(0, 120),
       visible: visible(cell),
@@ -1427,14 +1727,39 @@ _SNAPSHOT_JAVASCRIPT = """
       hidden: Boolean(cell.hidden),
       display: style.display.slice(0, 32),
       visibility: style.visibility.slice(0, 32),
+      sortDirection: direction,
+      sortActive: cell.classList.contains('after:bg-fpl-accent'),
     };
   });
+  const controls = Array.from(document.querySelectorAll(
+    'button,[role="button"],[role="combobox"],select'
+  )).filter(visible);
+  const compact = e => (e.innerText || e.textContent || '').replace(/\\s/g, '');
+  const exactlyOne = label => controls.filter(e => compact(e) === label).length === 1;
+  const search = Array.from(document.querySelectorAll('input')).filter(e =>
+    visible(e) && /^Search players(?:\\.{3}|…)?$/i.test(e.getAttribute('placeholder') || '')
+  );
+  const scrollTop = table => {
+    for (let e = table.parentElement; e; e = e.parentElement) {
+      if (/(auto|scroll)/.test(getComputedStyle(e).overflowY) && e.scrollHeight > e.clientHeight) {
+        return e.scrollTop;
+      }
+    }
+    return 0;
+  };
   const pageText = document.body ? document.body.innerText : '';
   return {
     tables: Array.from(document.querySelectorAll('table')).map((table) => ({
       headerRows: Array.from(table.querySelectorAll('thead tr')).map((row) => cells(row, 'th,td')),
       bodyRows: Array.from(table.querySelectorAll('tbody tr')).map((row) => cells(row, 'th,td')),
+      scrollTop: scrollTop(table),
     })),
+    scope: {
+      allPlayers: exactlyOne('Allplayers'),
+      searchEmpty: search.length === 1 && search[0].value.trim() === '',
+      priceUnrestricted: exactlyOne('£Min-£Max'),
+      pointsMetric: exactlyOne('Points'),
+    },
     loginRequired: /(?:log in|sign in|continue with patreon)/i.test(pageText),
     premiumUnavailable: /(?:premium required|upgrade|become a patron|subscribe)/i.test(pageText),
   };

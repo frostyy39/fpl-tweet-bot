@@ -86,15 +86,16 @@ def main(argv=None):
         )
         output = Path(config["audit_parent"]) / str(uuid4())
         create_result_directory(output)
+        acquisition = ProvenBrowserAcquisition(Path(config["profile_dir"]))
         result = CaptainWorker(
             client,
-            ProvenBrowserAcquisition(Path(config["profile_dir"])),
+            acquisition,
             Clock(),
             expected_user=config["expected_user"],
             cancelled=stop.is_set,
         ).run()
         audit = {
-            "schema_version": 3,
+            "schema_version": 4,
             "no_post": True,
             "worker_build_id": _worker_build_id(args.config),
             "started_at_utc": started.isoformat(),
@@ -108,6 +109,9 @@ def main(argv=None):
             ),
             "release_rejection": (
                 result.release_rejection.to_payload() if result.release_rejection else None
+            ),
+            "projection_coverage": (
+                acquisition.last_coverage.to_payload() if acquisition.last_coverage else None
             ),
         }
         with (output / "audit.json").open("x", encoding="utf-8", newline="\n") as stream:
